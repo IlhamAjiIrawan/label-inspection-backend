@@ -1,0 +1,32 @@
+fastapi
+uvicorn
+pydantic
+python-multipart
+pytesseract
+pillow
+numpy
+# opencv >=4.10 WAJIB di Python 3.14 + NumPy 2.x (fix 2026-09-15):
+# opencv 4.8 dibangun untuk NumPy 1.x → `import cv2` gagal total di NumPy 2.x,
+# yang merambat menjadi `from rapidocr import RapidOCR` ImportError sehingga
+# SEMUA OCR gagal ("rapidocr/onnxruntime belum install"). JANGAN turunkan ke 4.8.*.
+opencv-python>=4.10
+httpx==0.27.*
+python-dotenv==1.0.*
+google-genai>=1.0.0
+# OCR Engine Upgrade (2026-09-11): RapidOCR ONNX (PP-OCR, CPU) — engine default.
+# Tesseract (pytesseract) dipertahankan sebagai fallback via OCR_ENGINE=tesseract.
+rapidocr
+onnxruntime
+# Compare teks engine (2026-10-09 / PLAN_MIGRASI_DIFFLIB_KE_RAPIDFUZZ):
+# C++ cepat, algoritma sekeluarga difflib, offline penuh. Fallback otomatis
+# ke difflib bila import gagal (lihat _use_rapidfuzz di app/compare_text/similarity.py).
+rapidfuzz>=3.0
+# Reference MySQL backend (2026-09-15 / PLAN_MYSQL_BACKED_REFERENCE_STORAGE):
+# mysql-connector-python murni Python (tanpa compiler) + connection pooling bawaan.
+mysql-connector-python==8.4.*
+# OCR Native experiment (2026-09-12 / PADDLEOCR_NATIVE_PLAN §6.0 VERDICT: RED):
+# paddleocr + paddlepaddle TIDAK ditambahkan — tidak ada wheel paddlepaddle untuk
+# Python 3.14 Windows ("No matching distribution found"). Peningkatan akurasi
+# dicapai via model PP-OCRv6_rec_medium (ONNX, auto-download oleh rapidocr saat
+# RAPIDOCR_REC_MODEL=medium) + threshold ENV di bawah. JANGAN tambah paddleocr
+# ke file ini sebelum §6.0 plan hijau (butuh Python 3.11/3.12 atau wheel baru).

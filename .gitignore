@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+ENV/
+.env
+!.env.example
+
+# Dokumentasi planning -> GitHub Issues, JANGAN push ke repo
+# (semua .md dikecualikan kecuali README.md bila ada)
+*.md
+!README.md
+plans/*.md
+
+# Backup & data lokal — jangan commit
+*.bak
+*.bak-*
+*.sql
+baseline.json
+*.zip
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploads runtime (dibuat otomatis saat server jalan) — keep folder, ignore isi
+# Struktur dipertahankan via .gitkeep agar fresh clone langsung jalan
+uploads/*
+!uploads/.gitkeep
+!uploads/.gitignore
+!uploads/check/
+!uploads/ocr/
+!uploads/references/
+uploads/check/*
+!uploads/check/.gitkeep
+!uploads/check/.gitignore
+uploads/ocr/*
+!uploads/ocr/.gitkeep
+uploads/references/*
+!uploads/references/.gitkeep
+uploads/references_backup/
+uploads/_bench_native/
+uploads/_bench_native/
+tests/ocr_bench/
+uploads/*.png
+uploads/*.jpg
+uploads/*.jpeg
+uploads/*.json
+uploads/*.jsonl
+uploads/ocr/*.json
+uploads/callback_log.jsonl
+uploads/callback_dead_letter.jsonl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
