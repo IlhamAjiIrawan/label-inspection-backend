@@ -85,7 +85,7 @@ TESSERACT_CONFIG = f"--psm {TESSERACT_PSM}"
 # OCR Engine Upgrade (2026-09-11 / OCR_ENGINE_UPGRADE_PADDLE_PLAN)
 # "paddle" = RapidOCR ONNX (PP-OCR deteksi+recognisi, CPU) | "tesseract" = lama
 # ---------------------------------------------------------------------------
-OCR_ENGINE = os.getenv("OCR_ENGINE", "paddle").strip().lower()  # paddle | tesseract
+OCR_ENGINE = os.getenv("OCR_ENGINE", "paddle").strip().lower()  # paddle | vitstr | surya | tesseract
 OCR_DET_THRESHOLD = float(os.getenv("OCR_DET_THRESHOLD", "0.5"))
 OCR_REC_THRESHOLD = float(os.getenv("OCR_REC_THRESHOLD", "0.5"))
 OCR_MIN_TEXT_LEN = int(os.getenv("OCR_MIN_TEXT_LEN", "1"))

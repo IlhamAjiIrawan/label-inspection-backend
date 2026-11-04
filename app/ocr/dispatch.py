@@ -2,9 +2,10 @@
 app/ocr/dispatch.py — 1 pintu router OCR_ENGINE + bentuk result standar.
 
 - OCR_ENGINE=paddle    → RapidOCR ONNX (deteksi+recognisi, kontrak 'none').
+- OCR_ENGINE=vitstr    → ViTSTR-Tiny Vision Transformer (STR Hub PyTorch, ultra-cepat).
+- OCR_ENGINE=surya     → Surya OCR (SegFormer + Transformer, presisi tinggi multilingual).
 - OCR_ENGINE=tesseract → jalur LAMA 2-pass CLAHE (fallback, perilaku tidak berubah).
-- OCR_ENGINE=paddle_native → BELUM AKTIF (stub eksperimental
-  app/ocr/paddle_native_engine.py, butuh paddlepaddle yang tak ada wheel py3.14).
+- OCR_ENGINE=paddle_native → BELUM AKTIF (stub eksperimental).
 
 Return extract_label_text(): dict standar:
   {"engine","raw_text","cleaned_text","lines","text_present",
@@ -52,6 +53,54 @@ def extract_label_text_from_bytes(image_bytes: bytes, original_filename: str = "
             "timings": raw.get("timings", {}),
         }
 
+    if OCR_ENGINE == "vitstr":
+        from app.ocr.vitstr_engine import extract_from_bytes as vitstr_extract
+        from app.ocr.parser import clean_ocr_text
+
+        out = vitstr_extract(image_bytes)
+        text = out.get("text", "")
+        cleaned = clean_ocr_text(text)
+        text_present = bool(text and text.strip())
+        return {
+            "engine": "vitstr",
+            "raw_text": cleaned["raw_text"],
+            "cleaned_text": cleaned["cleaned_text"] if text_present else "none",
+            "lines": cleaned["lines"],
+            "text_present": text_present,
+            "is_empty": False,
+            "empty_reason": None if text_present else "no_text_detected",
+            "det_threshold": None,
+            "rec_threshold": None,
+            "det_model": "vitstr_tiny",
+            "rec_model": "vitstr_tiny",
+            "image_scale": 1.0,
+            "timings": out.get("timings", {}),
+        }
+
+    if OCR_ENGINE == "surya":
+        from app.ocr.surya_engine import extract_from_bytes as surya_extract
+        from app.ocr.parser import clean_ocr_text
+
+        out = surya_extract(image_bytes)
+        raw_text = "\n".join(out.get("lines", []))
+        cleaned = clean_ocr_text(raw_text)
+        text_present = bool(cleaned["cleaned_text"] and cleaned["cleaned_text"].strip())
+        return {
+            "engine": "surya",
+            "raw_text": cleaned["raw_text"],
+            "cleaned_text": cleaned["cleaned_text"] if text_present else "none",
+            "lines": cleaned["lines"],
+            "text_present": text_present,
+            "is_empty": False,
+            "empty_reason": None if text_present else "no_text_detected",
+            "det_threshold": None,
+            "rec_threshold": None,
+            "det_model": "surya_det3",
+            "rec_model": "surya_rec2",
+            "image_scale": 1.0,
+            "timings": out.get("timings", {}),
+        }
+
     # Fallback tesseract dari bytes: tulis tempfile lazy hanya saat dipakai.
     import tempfile as _tf
 
@@ -78,9 +127,7 @@ def extract_label_text(image_path: str | Path, original_filename: str = "") -> d
         original_filename: Nama asli client (info saja, untuk log).
 
     Returns:
-        dict standar (lihat modul docstring). Untuk paddle:
-        tidak ada teks → cleaned_text "none", text_present False,
-        is_empty False, empty_reason "no_text_detected".
+        dict standar (lihat modul docstring).
     """
     if OCR_ENGINE == "paddle":
         from app.ocr.paddle_engine import active_model_label, extract_text_paddle
@@ -108,8 +155,55 @@ def extract_label_text(image_path: str | Path, original_filename: str = "") -> d
             "timings": out.get("timings", {}),
         }
 
+    if OCR_ENGINE == "vitstr":
+        from app.ocr.vitstr_engine import extract_from_path as vitstr_extract_path
+        from app.ocr.parser import clean_ocr_text
+
+        out = vitstr_extract_path(image_path)
+        text = out.get("text", "")
+        cleaned = clean_ocr_text(text)
+        text_present = bool(text and text.strip())
+        return {
+            "engine": "vitstr",
+            "raw_text": cleaned["raw_text"],
+            "cleaned_text": cleaned["cleaned_text"] if text_present else "none",
+            "lines": cleaned["lines"],
+            "text_present": text_present,
+            "is_empty": False,
+            "empty_reason": None if text_present else "no_text_detected",
+            "det_threshold": None,
+            "rec_threshold": None,
+            "det_model": "vitstr_tiny",
+            "rec_model": "vitstr_tiny",
+            "image_scale": 1.0,
+            "timings": out.get("timings", {}),
+        }
+
+    if OCR_ENGINE == "surya":
+        from app.ocr.surya_engine import extract_from_path as surya_extract_path
+        from app.ocr.parser import clean_ocr_text
+
+        out = surya_extract_path(image_path)
+        raw_text = "\n".join(out.get("lines", []))
+        cleaned = clean_ocr_text(raw_text)
+        text_present = bool(cleaned["cleaned_text"] and cleaned["cleaned_text"].strip())
+        return {
+            "engine": "surya",
+            "raw_text": cleaned["raw_text"],
+            "cleaned_text": cleaned["cleaned_text"] if text_present else "none",
+            "lines": cleaned["lines"],
+            "text_present": text_present,
+            "is_empty": False,
+            "empty_reason": None if text_present else "no_text_detected",
+            "det_threshold": None,
+            "rec_threshold": None,
+            "det_model": "surya_det3",
+            "rec_model": "surya_rec2",
+            "image_scale": 1.0,
+            "timings": out.get("timings", {}),
+        }
+
     if OCR_ENGINE == "paddle_native":
-        # Stub eksperimental — selalu raise RuntimeError informatif sampai §6.0 hijau.
         from app.ocr.paddle_native_engine import extract_label_text_native
 
         return extract_label_text_native(image_path, original_filename)

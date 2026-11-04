@@ -3,10 +3,22 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.Python
+
+# Virtual Environments (semua variasi venv)
 .venv/
+.venv*/
 venv/
+venv*/
+env/
+env*/
 ENV/
+*.venv/
+
+# Environment files
 .env
+.env.*
+.env-*
 !.env.example
 
 # Dokumentasi planning -> GitHub Issues, JANGAN push ke repo
@@ -41,7 +53,6 @@ uploads/ocr/*
 uploads/references/*
 !uploads/references/.gitkeep
 uploads/references_backup/
-uploads/_bench_native/
 uploads/_bench_native/
 tests/ocr_bench/
 uploads/*.png

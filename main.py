@@ -528,8 +528,8 @@ def process_ocr_job(image_bytes: bytes, original_filename: str, saved_filename: 
         result = {
             "filename": saved_filename,
             "original_filename": original_filename,
-            "engine": "rapidocr" if OCR_ENGINE == "paddle" else "tesseract",
-            "language": "en" if OCR_ENGINE == "paddle" else TESSERACT_LANG,
+            "engine": OCR_ENGINE if OCR_ENGINE in ("vitstr", "surya") else ("rapidocr" if OCR_ENGINE == "paddle" else "tesseract"),
+            "language": "en" if OCR_ENGINE in ("paddle", "vitstr", "surya") else TESSERACT_LANG,
             "text_present": False,
             "det_threshold": None,
             "rec_threshold": None,
@@ -2222,10 +2222,15 @@ async def health():
         "ocr_failed_count": ocr_failed_count,
         "preprocessing": "CLAHE+autocontrast+adaptiveThreshold 2-pass (Fix 2026-09-06)",
         "ocr_engine": OCR_ENGINE,
-        "ocr_engine_available": __import__("app.ocr.paddle_engine", fromlist=["is_paddle_available"]).is_paddle_available() if OCR_ENGINE == "paddle" else tesseract_ok,
+        "ocr_engine_available": (
+            __import__("app.ocr.paddle_engine", fromlist=["is_paddle_available"]).is_paddle_available() if OCR_ENGINE == "paddle"
+            else (__import__("app.ocr.vitstr_engine", fromlist=["is_vitstr_available"]).is_vitstr_available() if OCR_ENGINE == "vitstr"
+            else (__import__("app.ocr.surya_engine", fromlist=["is_surya_available"]).is_surya_available() if OCR_ENGINE == "surya"
+            else tesseract_ok))
+        ),
         "ocr_none_contract": "cleaned_text='none' bila tak ada teks (text_present=false)",
         # OCR Tuning RapidOCR (2026-09-12 / PADDLEOCR_NATIVE_PLAN §6.6) — aditif.
-        "ocr_engine_allowed": ["paddle", "paddle_native", "tesseract"],
+        "ocr_engine_allowed": ["paddle", "vitstr", "surya", "paddle_native", "tesseract"],
         "ocr_native_available": __import__("app.ocr.paddle_native_engine", fromlist=["is_native_available"]).is_native_available(),
         "ocr_native_note": "paddle_native NONAKTIF: paddlepaddle tanpa wheel Python 3.14 (§6.0 RED). Akurasi via RAPIDOCR_REC_MODEL=medium.",
         "ocr_rapidocr_tuning": __import__("app.ocr.paddle_engine", fromlist=["active_model_label"]).active_model_label(),
