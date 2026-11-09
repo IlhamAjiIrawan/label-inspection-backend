@@ -11,7 +11,7 @@ Service FastAPI untuk **OCR label + callback ke Laravel**, **Check Batch 4–5 g
 | Area | Keterangan |
 |---|---|
 | OCR pipeline 10 tahap | Upload → validasi → simpan → preprocessing → OCR → parsing → store → GET → callback → reconcile |
-| Engine OCR | `paddle` (RapidOCR ONNX PP-OCR, default) dengan fallback `tesseract` via `OCR_ENGINE` |
+| Engine OCR | Multi-model selectable via `OCR_ENGINE`: `paddle` (RapidOCR ONNX, default), `vitstr` (ViTSTR-Tiny Transformer), `surya` (Surya OCR SegFormer/Transformer), dan `tesseract` (fallback) |
 | Callback PUSH ke Laravel | `cleaned_text` + HMAC-SHA256, retry 3x exponential, dead-letter, allowlist anti-SSRF |
 | Check Batch | `POST /api/check/captures` terima 4–5 gambar/batch + `POST /api/check/process` OCR batch + callback progresif per-slot |
 | Compare similarity | Reference vs slot (`rapidfuzz` default, fallback `difflib`), threshold 0.85, toleransi tanda baca, content-gate |
@@ -70,9 +70,11 @@ Scan-sekali-pilih-ulang: `POST /api/references` (kompres + OCR background) → `
 
 ## 4. Instalasi
 
+### 4.1 Instalasi Cepat (Default Engine - RapidOCR)
+
 ```powershell
 # 1. Clone
-git clone https://github.com/ajidwi02/label-inspection-backend.git
+git clone https://github.com/IlhamAjiIrawan/label-inspection-backend.git
 cd label-inspection-backend
 
 # 2. Virtual env + dependensi
@@ -99,6 +101,88 @@ Verifikasi:
 ```powershell
 curl.exe -s http://127.0.0.1:9000/health
 curl.exe -s http://127.0.0.1:9000/
+```
+
+### 4.2 Manajemen Multi Virtual Environment (Switching Model OCR)
+
+Backend ini mendukung beberapa engine OCR (*Multi-Modal*). Untuk menghindari konflik dependensi antara PyTorch, ONNX Runtime, dan SegFormer/Transformers, project ini memisahkan lingkungan Python ke dalam virtual environment masing-masing:
+
+| Model / Engine | Nilai `OCR_ENGINE` | Virtual Environment | Karakteristik Utama |
+|---|---|---|---|
+| **RapidOCR ONNX** *(Default)* | `paddle` | `.venv` | Ringan, CPU-friendly (~1–4s), default PP-OCRv6 |
+| **ViTSTR-Tiny** | `vitstr` | `.venv-vitstr` | Vision Transformer (STR Hub PyTorch), ultra-cepat |
+| **Surya OCR** | `surya` | `.venv-surya` | SegFormer + Transformer, presisi tinggi multilingual |
+| **Tesseract** | `tesseract` | `.venv` | Fallback engine legacy via binary Tesseract OCR |
+
+#### Cara Mengganti Virtual Environment & Model:
+
+Saat ingin berganti engine:
+
+1. **Nonaktifkan venv aktif** (jika ada):
+   ```powershell
+   deactivate
+   ```
+
+2. **Aktifkan Virtual Environment tujuan**:
+   - Jika ingin menggunakan **ViTSTR**:
+     ```powershell
+     .\.venv-vitstr\Scripts\Activate.ps1
+     ```
+   - Jika ingin menggunakan **Surya OCR**:
+     ```powershell
+     .\.venv-surya\Scripts\Activate.ps1
+     ```
+   - Jika ingin kembali ke **RapidOCR (Default)** / **Tesseract**:
+     ```powershell
+     .\.venv\Scripts\Activate.ps1
+     ```
+
+3. **Ubah variabel `OCR_ENGINE` di file `.env`**:
+   Buka file `.env` dan ganti nilai `OCR_ENGINE`:
+   ```ini
+   # Pilihan: paddle | vitstr | surya | tesseract
+   OCR_ENGINE=surya
+   ```
+
+4. **(Opsional) Validasi model secara mandiri**:
+   Jalankan skrip tes bawaan sebelum menyalakan server:
+   ```powershell
+   # Pengujian ViTSTR (.venv-vitstr):
+   python test_vitstr.py
+
+   # Pengujian Surya OCR (.venv-surya):
+   python test_surya.py
+   ```
+
+5. **Jalankan kembali FastAPI server**:
+   ```powershell
+   python main.py
+   ```
+
+#### Setup Virtual Environment Baru dari Awal (Jika Clone di Komputer Baru)
+
+Karena folder `.venv*` di-ignore oleh Git, jika Anda clone di mesin baru dan ingin mengaktifkan model tambahan, siapkan venv sebagai berikut:
+
+```powershell
+# 1. Setup .venv (RapidOCR + Base FastAPI)
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+deactivate
+
+# 2. Setup .venv-vitstr (ViTSTR / PyTorch)
+python -m venv .venv-vitstr
+.\.venv-vitstr\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install torch torchvision timm
+deactivate
+
+# 3. Setup .venv-surya (Surya OCR)
+python -m venv .venv-surya
+.\.venv-surya\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install surya-ocr
+deactivate
 ```
 
 ---
@@ -128,7 +212,7 @@ Generate baru (PowerShell):
 
 | Variabel | Default | Keterangan |
 |---|---|---|
-| `OCR_ENGINE` | `paddle` | `paddle` (RapidOCR ONNX) \| `tesseract` (fallback lama) |
+| `OCR_ENGINE` | `paddle` | Pilihan model: `paddle` (RapidOCR ONNX default) \| `vitstr` (ViTSTR Transformer) \| `surya` (Surya OCR) \| `tesseract` (fallback lama) |
 | `OCR_DET_THRESHOLD` / `OCR_REC_THRESHOLD` | `0.5` / `0.5` | Ambang deteksi/recognition |
 | `OCR_MIN_TEXT_LEN` | `1` | Panjang teks minimum |
 | `OCR_MODEL_DIR` | kosong | Direktori model kustom (kosong = auto-download) |
