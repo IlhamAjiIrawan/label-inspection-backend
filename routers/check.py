@@ -36,6 +36,7 @@ try:
     from app.config import (
         CHECK_UPLOAD_ROOT,
         CHECK_API_KEY,
+        LARAVEL_API_KEY,
         CHECK_MAX_FILE_SIZE,
         CHECK_ALLOWED_MIMES,
         CHECK_OCR_ENABLED,
@@ -50,6 +51,7 @@ try:
 except ImportError:
     CHECK_UPLOAD_ROOT = Path("uploads/check")
     CHECK_API_KEY = os.getenv("CHECK_API_KEY", "")
+    LARAVEL_API_KEY = os.getenv("LARAVEL_API_KEY", "")
     CHECK_MAX_FILE_SIZE = 5 * 1024 * 1024
     CHECK_ALLOWED_MIMES = {"image/png", "image/jpeg"}
     CHECK_OCR_ENABLED = os.getenv("CHECK_OCR_ENABLED", "true").lower() == "true"
@@ -124,15 +126,19 @@ CHECK_ALLOWED_COUNTS = (4, 5)
 
 
 def _validate_api_key(x_api_key: Optional[str]) -> bool:
-    """Validasi X-API-Key timing-safe. Jika CHECK_API_KEY kosong (dev), izinkan."""
-    if not CHECK_API_KEY:
-        logger.warning("[CHECK] CHECK_API_KEY empty — allowing all (dev mode)")
+    """Validasi X-API-Key timing-safe. Jika key kosong (dev), izinkan."""
+    valid_keys = [k for k in (CHECK_API_KEY, LARAVEL_API_KEY) if k]
+    if not valid_keys:
+        logger.warning("[CHECK] CHECK_API_KEY and LARAVEL_API_KEY empty — allowing all (dev mode)")
         return True
     if not x_api_key:
         return False
     import hmac
 
-    return hmac.compare_digest(x_api_key, CHECK_API_KEY)
+    for expected in valid_keys:
+        if hmac.compare_digest(x_api_key, expected):
+            return True
+    return False
 
 
 def _validate_magic(file_bytes: bytes, ext: str) -> bool:

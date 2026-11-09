@@ -19,7 +19,22 @@ try:
     if _env_path.exists():
         load_dotenv(dotenv_path=_env_path, override=False)
 except ImportError:
-    pass
+    # Fallback parser mandiri jika python-dotenv belum terpasang
+    _env_path = Path(__file__).resolve().parent.parent / ".env"
+    if _env_path.exists():
+        try:
+            with open(_env_path, "r", encoding="utf-8") as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if not _line or _line.startswith("#") or "=" not in _line:
+                        continue
+                    _k, _v = _line.split("=", 1)
+                    _k = _k.strip()
+                    _v = _v.strip().strip("'\"")
+                    if _k not in os.environ:
+                        os.environ[_k] = _v
+        except Exception:
+            pass
 
 # --- Upload & Storage ---
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
@@ -238,21 +253,30 @@ LARAVEL_CALLBACK_URL = (
     or "http://127.0.0.1:8000/api/ocr/callback"
 )
 
+def _clean_env_val(val: str = None) -> str:
+    if not val:
+        return ""
+    val = val.strip()
+    if val in ("", "YOUR_API_KEY_HERE", "YOUR_CHECK_API_KEY", "YOUR_HMAC_SECRET_HERE"):
+        return ""
+    return val
+
+
 # API Key untuk header X-API-Key (wajib diisi di .env untuk production)
 # Prioritas: LARAVEL_API_KEY -> OCR_CALLBACK_API_KEY -> FASTAPI_API_KEY
 LARAVEL_API_KEY = (
-    os.getenv("LARAVEL_API_KEY")
-    or os.getenv("OCR_CALLBACK_API_KEY")
-    or os.getenv("FASTAPI_API_KEY")
+    _clean_env_val(os.getenv("LARAVEL_API_KEY"))
+    or _clean_env_val(os.getenv("OCR_CALLBACK_API_KEY"))
+    or _clean_env_val(os.getenv("FASTAPI_API_KEY"))
     or ""
 )
 
 # Secret untuk HMAC-SHA256 header X-Signature (min 32 char random)
 # Prioritas: LARAVEL_HMAC_SECRET -> OCR_CALLBACK_SECRET -> LARAVEL_CALLBACK_SECRET
 LARAVEL_HMAC_SECRET = (
-    os.getenv("LARAVEL_HMAC_SECRET")
-    or os.getenv("OCR_CALLBACK_SECRET")
-    or os.getenv("LARAVEL_CALLBACK_SECRET")
+    _clean_env_val(os.getenv("LARAVEL_HMAC_SECRET"))
+    or _clean_env_val(os.getenv("OCR_CALLBACK_SECRET"))
+    or _clean_env_val(os.getenv("LARAVEL_CALLBACK_SECRET"))
     or ""
 )
 
@@ -308,10 +332,10 @@ if not CHECK_UPLOAD_ROOT.is_absolute():
 
 # API Key khusus Check — fallback berurutan: CHECK_API_KEY -> LARAVEL_API_KEY -> OCR_CALLBACK_API_KEY -> FASTAPI_API_KEY
 CHECK_API_KEY = (
-    os.getenv("CHECK_API_KEY")
-    or os.getenv("LARAVEL_API_KEY")
-    or os.getenv("OCR_CALLBACK_API_KEY")
-    or os.getenv("FASTAPI_API_KEY")
+    _clean_env_val(os.getenv("CHECK_API_KEY"))
+    or _clean_env_val(os.getenv("LARAVEL_API_KEY"))
+    or _clean_env_val(os.getenv("OCR_CALLBACK_API_KEY"))
+    or _clean_env_val(os.getenv("FASTAPI_API_KEY"))
     or ""
 )
 

@@ -37,6 +37,7 @@ from pydantic import BaseModel
 try:
     from app.config import (
         CHECK_API_KEY,
+        LARAVEL_API_KEY,
         REF_DB_PATH,
         REF_JPG_QUALITY,
         REF_MAX_BYTES_MB,
@@ -50,6 +51,7 @@ except ImportError:
     import os as _os
 
     CHECK_API_KEY = _os.getenv("CHECK_API_KEY", "")
+    LARAVEL_API_KEY = _os.getenv("LARAVEL_API_KEY", "")
     REF_ROOT = Path("uploads/references")
     REF_DB_PATH = REF_ROOT / "references.db"
     REF_MAX_IMAGE_DIM = 1280
@@ -187,15 +189,19 @@ def _now_iso() -> str:
 
 
 def _validate_api_key(x_api_key: Optional[str]) -> bool:
-    """Validasi X-API-Key timing-safe. Jika CHECK_API_KEY kosong (dev), izinkan."""
-    if not CHECK_API_KEY:
-        logger.warning("[REFERENCES] CHECK_API_KEY empty — allowing all (dev mode)")
+    """Validasi X-API-Key timing-safe. Jika key kosong (dev), izinkan."""
+    valid_keys = [k for k in (CHECK_API_KEY, LARAVEL_API_KEY) if k]
+    if not valid_keys:
+        logger.warning("[REFERENCES] CHECK_API_KEY and LARAVEL_API_KEY empty — allowing all (dev mode)")
         return True
     if not x_api_key:
         return False
     import hmac
 
-    return hmac.compare_digest(x_api_key, CHECK_API_KEY)
+    for expected in valid_keys:
+        if hmac.compare_digest(x_api_key, expected):
+            return True
+    return False
 
 
 def _extract_api_key(request: Request, header_key: Optional[str] = None) -> Optional[str]:
