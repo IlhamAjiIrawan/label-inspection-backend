@@ -973,6 +973,70 @@ async def list_references(
 
 
 # ---------------------------------------------------------------------------
+# POST /api/references/detect-regions — Opsi C Auto-Detect & Deskew Label (Front & Back)
+# ---------------------------------------------------------------------------
+@router.post("/detect-regions")
+@_handle_db_error
+async def detect_reference_regions(
+    request: Request,
+    image: UploadFile = File(...),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    effective_key = _extract_api_key(request, x_api_key)
+    if not _validate_api_key(effective_key):
+        return JSONResponse(status_code=401, content={"success": False, "message": "Invalid API key", "error": "unauthorized"})
+
+    try:
+        from app.vision.label_detector import detect_labels, image_to_base64_data_url
+        import cv2
+        import numpy as np
+
+        contents = await image.read()
+        if not contents:
+            return JSONResponse(status_code=422, content={"success": False, "message": "File gambar kosong", "error": "empty_file"})
+
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return JSONResponse(status_code=422, content={"success": False, "message": "Format gambar tidak valid / rusak", "error": "invalid_image"})
+
+        res = detect_labels(img, fallback_on_miss=True)
+
+        annotated_b64 = image_to_base64_data_url(res["annotated_image"], ext="png")
+
+        slots_payload = []
+        for s in res["slots"]:
+            crop_b64 = image_to_base64_data_url(s["cropped_image"], ext="png")
+            ch, cw = s["cropped_image"].shape[:2]
+            slots_payload.append({
+                "slot": s["slot"],
+                "label_name": s["label_name"],
+                "is_fallback": s.get("is_fallback", False),
+                "crop_data_url": crop_b64,
+                "w": cw,
+                "h": ch,
+                "rect": s["rect"],
+                "box_points": s["box_points"],
+            })
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "detected_count": len(slots_payload),
+                "annotated_preview": annotated_b64,
+                "slots": slots_payload,
+                "elapsed_ms": res["elapsed_ms"],
+                "image_width": int(img.shape[1]),
+                "image_height": int(img.shape[0]),
+            }
+        )
+    except Exception as e:
+        logger.error(f"[REFERENCES] detect-regions failed: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Deteksi gagal: {str(e)}", "error": "detection_failed"})
+
+
+# ---------------------------------------------------------------------------
 # GET /api/references/{ref_id} — detail
 # ---------------------------------------------------------------------------
 @router.get("/{ref_id}")
