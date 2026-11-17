@@ -89,14 +89,44 @@ def deskew_crop(image: np.ndarray, rect: Tuple[Tuple[float, float], Tuple[float,
     return cv2.warpPerspective(image, m, (max_w, max_h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
 
 
+def expand_rect_short_axis(
+    rect: Tuple[Tuple[float, float], Tuple[float, float], float],
+    factor: float = 1.18
+) -> Tuple[Tuple[float, float], Tuple[float, float], float]:
+    """
+    Memperluas sumbu pendek (lebar pita kain) sebesar `factor` (default 18%)
+    secara simetris di sekitar pusat tanpa mengubah sumbu panjang (panjang pita),
+    pusat (cx, cy), atau sudut rotasi (angle).
+
+    Tujuannya memberikan ruang napas (breathing room / margin) yang nyaman
+    pada sisi kiri & kanan label sehingga teks tidak terlalu mepet atau terpotong pada tepi crop.
+    """
+    (cx, cy), (w, h), angle = rect
+    if w <= 0 or h <= 0:
+        return rect
+    if w < h:
+        new_w = w * factor
+        new_h = h
+    else:
+        new_w = w
+        new_h = h * factor
+    return ((cx, cy), (new_w, new_h), angle)
+
+
 def refine_tight_bounds(
     image: np.ndarray,
     is_vertical: bool,
-    margin_ratio: float = 0.02
+    margin_ratio_long: float = 0.02,
+    margin_ratio_short: float = 0.08,
+    keep_full_short_axis: bool = True
 ) -> Tuple[int, int, int, int, int]:
     """
-    Menemukan batas pita label yang ketat (menghilangkan meja kosong di pinggir)
-    dan menghitung titik tengah (midpoint) yang presisi berdasarkan akumulasi gradien Sobel.
+    Menemukan batas pita label yang presisi dan menghitung titik tengah (midpoint)
+    berdasarkan akumulasi gradien Sobel.
+
+    Pada sumbu pendek (lebar pita jika vertikal), secara default mempertahankan
+    seluruh lebar hasil ekspansi (keep_full_short_axis=True) agar teks memiliki
+    margin kiri & kanan yang lega dan simetris, tidak terpotong.
 
     Returns:
         (x_min, x_max, y_min, y_max, midpoint)
@@ -110,27 +140,30 @@ def refine_tight_bounds(
     sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     mag = cv2.magnitude(sobelx, sobely)
 
-    # Redam 3% margin terluar agar artefak tepi warp tidak mengganggu
-    bx = max(2, int(w * 0.03))
-    by = max(2, int(h * 0.03))
-    mag[:by, :] = 0; mag[-by:, :] = 0; mag[:, :bx] = 0; mag[:, -bx:] = 0
-
-    pad_x = max(2, int(w * margin_ratio))
-    pad_y = max(2, int(h * margin_ratio))
+    pad_y = max(2, int(h * margin_ratio_long))
+    pad_x = max(2, int(w * margin_ratio_long))
 
     if is_vertical:
         # 1. Sumbu pendek X (lebar pita kain)
-        col_energy = mag.sum(axis=0)
-        table_noise_x = np.percentile(col_energy[bx:-bx], 15) if w > bx * 2 else col_energy.min()
-        th_x = table_noise_x + (col_energy.max() - table_noise_x) * 0.20
-        act_x = np.where(col_energy > th_x)[0]
-        if len(act_x) > 0:
-            x_min = max(0, act_x[0] - pad_x)
-            x_max = min(w, act_x[-1] + pad_x)
-        else:
+        if keep_full_short_axis:
             x_min, x_max = 0, w
+        else:
+            bx = max(2, int(w * 0.03))
+            mag[:, :bx] = 0; mag[:, -bx:] = 0
+            col_energy = mag.sum(axis=0)
+            table_noise_x = np.percentile(col_energy[bx:-bx], 15) if w > bx * 2 else col_energy.min()
+            th_x = table_noise_x + (col_energy.max() - table_noise_x) * 0.20
+            act_x = np.where(col_energy > th_x)[0]
+            pad_short = max(20, int(w * margin_ratio_short))
+            if len(act_x) > 0:
+                x_min = max(0, act_x[0] - pad_short)
+                x_max = min(w, act_x[-1] + pad_short)
+            else:
+                x_min, x_max = 0, w
 
         # 2. Sumbu panjang Y (tinggi pita kain) di dalam rentang kolom x_min..x_max
+        by = max(2, int(h * 0.03))
+        mag[:by, :] = 0; mag[-by:, :] = 0
         sub_mag = mag[:, x_min:x_max]
         row_energy = sub_mag.sum(axis=1)
         table_noise_y = np.percentile(row_energy[by:-by], 15) if h > by * 2 else row_energy.min()
@@ -149,17 +182,25 @@ def refine_tight_bounds(
     else:
         # Pita Horizontal
         # 1. Sumbu pendek Y (tinggi pita kain)
-        row_energy = mag.sum(axis=1)
-        table_noise_y = np.percentile(row_energy[by:-by], 15) if h > by * 2 else row_energy.min()
-        th_y = table_noise_y + (row_energy.max() - table_noise_y) * 0.20
-        act_y = np.where(row_energy > th_y)[0]
-        if len(act_y) > 0:
-            y_min = max(0, act_y[0] - pad_y)
-            y_max = min(h, act_y[-1] + pad_y)
-        else:
+        if keep_full_short_axis:
             y_min, y_max = 0, h
+        else:
+            by = max(2, int(h * 0.03))
+            mag[:by, :] = 0; mag[-by:, :] = 0
+            row_energy = mag.sum(axis=1)
+            table_noise_y = np.percentile(row_energy[by:-by], 15) if h > by * 2 else row_energy.min()
+            th_y = table_noise_y + (row_energy.max() - table_noise_y) * 0.20
+            act_y = np.where(row_energy > th_y)[0]
+            pad_short = max(20, int(h * margin_ratio_short))
+            if len(act_y) > 0:
+                y_min = max(0, act_y[0] - pad_short)
+                y_max = min(h, act_y[-1] + pad_short)
+            else:
+                y_min, y_max = 0, h
 
         # 2. Sumbu panjang X (lebar pita kain) di dalam rentang baris y_min..y_max
+        bx = max(2, int(w * 0.03))
+        mag[:, :bx] = 0; mag[:, -bx:] = 0
         sub_mag = mag[y_min:y_max, :]
         col_energy = sub_mag.sum(axis=0)
         table_noise_x = np.percentile(col_energy[bx:-bx], 15) if w > bx * 2 else col_energy.min()
@@ -179,7 +220,8 @@ def detect_labels(
     image: np.ndarray,
     min_area_ratio: float = 0.015,
     max_area_ratio: float = 0.92,
-    fallback_on_miss: bool = True
+    fallback_on_miss: bool = True,
+    short_axis_factor: float = 1.18
 ) -> Dict[str, Any]:
     """
     Deteksi Label 1 & Label 2 pada foto pakaian dengan pemotongan ketat
@@ -273,7 +315,7 @@ def detect_labels(
     # =========================================================================
     if is_single_strip:
         cand = candidates[0]
-        rect = cand["rect"]
+        rect = expand_rect_short_axis(cand["rect"], factor=short_axis_factor)
         m, m_inv, max_w, max_h = get_perspective_matrices(image, rect)
 
         if m is not None:
@@ -348,7 +390,7 @@ def detect_labels(
 
         for idx, item in enumerate(selected):
             s_num = idx + 1
-            rect = item["rect"]
+            rect = expand_rect_short_axis(item["rect"], factor=short_axis_factor)
             m, m_inv, max_w, max_h = get_perspective_matrices(image, rect)
             if m is not None:
                 warped = cv2.warpPerspective(image, m, (max_w, max_h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
