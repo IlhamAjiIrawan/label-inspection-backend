@@ -2418,3 +2418,88 @@ async def get_latest_batch(request: Request, x_api_key: Optional[str] = Header(N
         )
     except Exception as e:
         return JSONResponse(status_code=500, content={"success": False, "message": str(e), "error": "internal_error"})
+
+
+# --- ENDPOINT: DELETE /api/check/cleanup (Retensi & Pembersihan Batch FastAPI) ---
+@router.delete("/cleanup")
+async def cleanup_check_uploads(
+    request: Request,
+    days: int = Query(30, ge=0, description="Hapus folder batch yang usianya >= N hari (0 = semua batch)"),
+    dry_run: bool = Query(False, description="Simulasi tanpa menghapus file fisik"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    """
+    Membersihkan subdirektori batch di uploads/check/ yang lebih tua dari N hari.
+    Retensi default: 30 hari.
+    """
+    effective_key = x_api_key or request.headers.get("X-API-Key") or request.headers.get("x-api-key") or request.query_params.get("api_key")
+    if CHECK_API_KEY and effective_key:
+        if not _validate_api_key(effective_key):
+            return JSONResponse(status_code=401, content={"success": False, "message": "Invalid API key", "error": "unauthorized"})
+
+    try:
+        now_ts = time.time()
+        cutoff_seconds = days * 86400
+
+        deleted_batches = 0
+        deleted_files = 0
+        freed_bytes = 0
+        skipped_batches = 0
+        errors = []
+
+        if CHECK_UPLOAD_ROOT.exists():
+            for p in CHECK_UPLOAD_ROOT.iterdir():
+                if not p.is_dir():
+                    continue
+                if not BATCH_CODE_RE.match(p.name):
+                    continue
+                if not is_safe_path(CHECK_UPLOAD_ROOT, p):
+                    continue
+
+                try:
+                    mtime = p.stat().st_mtime
+                    age_seconds = now_ts - mtime
+
+                    # Cek threshold hari
+                    if days > 0 and age_seconds < cutoff_seconds:
+                        skipped_batches += 1
+                        continue
+
+                    # Hitung ukuran folder dan jumlah file
+                    batch_bytes = 0
+                    batch_files = 0
+                    for f in p.rglob("*"):
+                        if f.is_file():
+                            batch_files += 1
+                            try:
+                                batch_bytes += f.stat().st_size
+                            except Exception:
+                                pass
+
+                    if not dry_run:
+                        shutil.rmtree(p, ignore_errors=True)
+
+                    deleted_batches += 1
+                    deleted_files += batch_files
+                    freed_bytes += batch_bytes
+
+                except Exception as ex:
+                    errors.append(f"Gagal memproses batch {p.name}: {str(ex)}")
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "dry_run": dry_run,
+                "days_threshold": days,
+                "deleted_batches": deleted_batches,
+                "deleted_files": deleted_files,
+                "freed_bytes": freed_bytes,
+                "skipped_batches": skipped_batches,
+                "errors": errors,
+                "message": f"{'Simulasi: ' if dry_run else ''}Berhasil membersihkan {deleted_batches} batch ({deleted_files} file, {freed_bytes} bytes).",
+            },
+        )
+    except Exception as e:
+        logger.error(f"[CHECK CLEANUP] endpoint failed: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"success": False, "message": str(e), "error": "internal_error"})
