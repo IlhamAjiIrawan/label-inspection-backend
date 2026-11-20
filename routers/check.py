@@ -1357,20 +1357,24 @@ def _process_batch_ocr(batch_code: str):
     }
     _write_batch_json(batch_code, batch_data)
     total_start = time.time()
-    results: List[dict] = []
-    for slot in expected_slots:
+
+    def _worker(slot: int) -> dict:
         img_path = _slot_png_path(batch_code, slot)
         if not img_path or not img_path.exists():
-            res = {"slot": slot, "status": "failed", "is_empty": True, "error": "image file not found", "filename": f"slot{slot}.png", "batch_code": batch_code, "side": "unknown"}
+            res = {
+                "slot": slot,
+                "status": "failed",
+                "is_empty": True,
+                "error": "image file not found",
+                "filename": f"slot{slot}.png",
+                "batch_code": batch_code,
+                "side": "unknown",
+            }
             odir.mkdir(parents=True, exist_ok=True)
             with open(odir / f"slot{slot}.json", "w", encoding="utf-8") as f:
                 json.dump(res, f, indent=2, ensure_ascii=False)
-            results.append(res)
-            # ★ PROGRESSIVE CALLBACK: slot gagal (file hilang) tetap dikirim segera, non-blocking.
-            if CHECK_OCR_CALLBACK_ENABLED and _is_progressive_enabled():
-                print(f"[CHECK CALLBACK] Dispatching slot {slot} callback in background...")
-                _dispatch_slot_callback(batch_code, res, f"{len(results)}/{total}")
-            continue
+            return res
+
         try:
             # Deteksi sisi dari filename (REVIEW_FLOW_COMPARE_FRONT_BACK_PLAN)
             from app.compare_text.side_detect import detect_side
@@ -1399,40 +1403,70 @@ def _process_batch_ocr(batch_code: str):
                     json.dump(res, f, indent=2, ensure_ascii=False)
             except Exception:
                 pass
-            results.append(res)
-            # -------------------------------------------------------------
-            # ★ PROGRESSIVE CALLBACK: dispatch hasil slot SEGERA via thread
-            # terpisah (Non-Blocking). Loop OCR langsung lanjut slot berikut.
-            # -------------------------------------------------------------
-            if CHECK_OCR_CALLBACK_ENABLED and _is_progressive_enabled():
-                print(f"[CHECK CALLBACK] Dispatching slot {slot} callback in background...")
-                _dispatch_slot_callback(batch_code, res, f"{len(results)}/{total}")
+            return res
         except Exception as e:
             logger.error(f"[CHECK OCR] slot{slot} {batch_code} exception: {e}", exc_info=True)
             print(f"[CHECK OCR] slot{slot} {batch_code} exception: {e}")
-            res = {"slot": slot, "status": "failed", "is_empty": True, "error": str(e)[:500], "filename": img_path.name, "batch_code": batch_code, "side": "unknown"}
+            res = {
+                "slot": slot,
+                "status": "failed",
+                "is_empty": True,
+                "error": str(e)[:500],
+                "filename": img_path.name if img_path else f"slot{slot}.png",
+                "batch_code": batch_code,
+                "side": "unknown",
+            }
             with open(odir / f"slot{slot}.json", "w", encoding="utf-8") as f:
                 json.dump(res, f, indent=2, ensure_ascii=False)
-            results.append(res)
+            return res
+
+    import concurrent.futures
+    from app.config import CHECK_OCR_MAX_WORKERS
+
+    workers = max(1, min(CHECK_OCR_MAX_WORKERS, len(expected_slots)))
+    print(f"[CHECK OCR] Processing {len(expected_slots)} slots with {workers} workers (parallel)")
+
+    results_map: dict[int, dict] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_slot = {executor.submit(_worker, slot): slot for slot in expected_slots}
+        for future in concurrent.futures.as_completed(future_to_slot):
+            slot = future_to_slot[future]
+            try:
+                res = future.result()
+            except Exception as e:
+                res = {
+                    "slot": slot,
+                    "status": "failed",
+                    "is_empty": True,
+                    "error": str(e)[:500],
+                    "batch_code": batch_code,
+                    "side": "unknown",
+                }
+            results_map[slot] = res
+
+            # ★ PROGRESSIVE CALLBACK: dispatch hasil slot SEGERA via thread
+            # terpisah (Non-Blocking). Loop OCR langsung lanjut slot berikut.
             if CHECK_OCR_CALLBACK_ENABLED and _is_progressive_enabled():
                 print(f"[CHECK CALLBACK] Dispatching slot {slot} callback in background...")
-                _dispatch_slot_callback(batch_code, res, f"{len(results)}/{total}")
-        # update batch.json progress tiap slot selesai
-        completed = sum(1 for r in results if r.get("status") == "success")
-        failed = sum(1 for r in results if r.get("status") == "failed")
-        pending = total - len(results)
-        batch_data.update(
-            {
-                "updated_at": datetime.now(JAKARTA_TZ).isoformat(),
-                "completed_count": completed,
-                "failed_count": failed,
-                "pending_count": pending,
-                "progress": f"{len(results)}/{total}",
-                "overall_status": "processing" if pending > 0 else ("completed" if failed == 0 else ("partial_failed" if failed < total else "failed")),
-                "slots": results + [{"slot": s, "status": "pending"} for s in expected_slots[len(results):]],
-            }
-        )
-        _write_batch_json(batch_code, batch_data)
+                _dispatch_slot_callback(batch_code, res, f"{len(results_map)}/{total}")
+
+            # update batch.json progress tiap slot selesai
+            completed = sum(1 for r in results_map.values() if r.get("status") == "success")
+            failed = sum(1 for r in results_map.values() if r.get("status") == "failed")
+            pending = total - len(results_map)
+            slots_progress = [results_map.get(s, {"slot": s, "status": "pending"}) for s in expected_slots]
+            batch_data.update(
+                {
+                    "updated_at": datetime.now(JAKARTA_TZ).isoformat(),
+                    "completed_count": completed,
+                    "failed_count": failed,
+                    "pending_count": pending,
+                    "progress": f"{len(results_map)}/{total}",
+                    "overall_status": "processing" if pending > 0 else ("completed" if failed == 0 else ("partial_failed" if failed < total else "failed")),
+                    "slots": slots_progress,
+                }
+            )
+            _write_batch_json(batch_code, batch_data)
 
     total_elapsed = round(time.time() - total_start, 3)
     final_slots: List[dict] = []

@@ -68,7 +68,7 @@ RATE_LIMIT_SECONDS = 60
 # Sekarang: burst sliding-window, default 5 req / 60s (via env, BUTUH RESTART).
 # Alasan 5: preview front+back (2) + forward save front+back (2) + 1 retake cadangan.
 # Spam 6+/menit masih 429 + Retry-After (anti-abuse tetap jalan).
-POST_RATE_LIMIT_REQUESTS = int(os.getenv("POST_RATE_LIMIT_REQUESTS", "5"))
+POST_RATE_LIMIT_REQUESTS = int(os.getenv("POST_RATE_LIMIT_REQUESTS", "20"))
 POST_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("POST_RATE_LIMIT_WINDOW_SECONDS", "60"))
 
 # --- Rate limiting GET (polling) & DELETE (cleanup) — Ideal handling 429 (11. Penanganan 429) ---
@@ -118,7 +118,7 @@ OCR_MODEL_DIR = os.getenv("OCR_MODEL_DIR", "").strip() or None
 # Dibaca saat engine dibangun (lazy singleton) → perubahan BUTUH RESTART.
 # Validasi ringan di sini; validasi penuh (enum rapidocr) di paddle_engine.
 # ---------------------------------------------------------------------------
-RAPIDOCR_REC_MODEL = os.getenv("RAPIDOCR_REC_MODEL", "medium").strip().lower() or "medium"  # medium | small
+RAPIDOCR_REC_MODEL = os.getenv("RAPIDOCR_REC_MODEL", "small").strip().lower() or "small"  # medium | small
 RAPIDOCR_REC_VERSION = os.getenv("RAPIDOCR_REC_VERSION", "PP-OCRv6").strip() or "PP-OCRv6"  # PP-OCRv6 | PP-OCRv5
 RAPIDOCR_REC_LANG = os.getenv("RAPIDOCR_REC_LANG", "en").strip().lower() or "en"  # en | ch | latin ...
 RAPIDOCR_DET_VERSION = os.getenv("RAPIDOCR_DET_VERSION", "PP-OCRv6").strip() or "PP-OCRv6"
@@ -346,7 +346,7 @@ CHECK_ALLOWED_MIMES = {m.strip().lower() for m in os.getenv("CHECK_ALLOWED_MIMES
 # Check OCR Batch — Process 5 Labels (PLAN_CHECK_OCR_5_LABEL_PROCESS)
 # ---------------------------------------------------------------------------
 CHECK_OCR_ENABLED = os.getenv("CHECK_OCR_ENABLED", "true").lower() == "true"
-CHECK_OCR_MAX_WORKERS = int(os.getenv("CHECK_OCR_MAX_WORKERS", "1"))  # 1 serial, 2 paralel
+CHECK_OCR_MAX_WORKERS = int(os.getenv("CHECK_OCR_MAX_WORKERS", "2"))  # 1 serial, 2 paralel
 CHECK_OCR_TIMEOUT_SECONDS = float(os.getenv("CHECK_OCR_TIMEOUT_SECONDS", "15.0"))
 CHECK_PROCESS_RATE_LIMIT_REQUESTS = int(os.getenv("CHECK_PROCESS_RATE_LIMIT_REQUESTS", "10"))
 CHECK_PROCESS_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("CHECK_PROCESS_RATE_LIMIT_WINDOW_SECONDS", "60"))

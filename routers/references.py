@@ -429,6 +429,9 @@ async def create_reference(
     source: str = Form("", description="Opsional audit"),
     user_id: str = Form("", description="Opsional audit"),
     side: str = Form("", description="Sisi label: 'front' atau 'back'. Kosong = front (default)"),
+    cleaned_text: str = Form("", description="Prefill OCR text bila sudah didapat saat preview"),
+    lines_json: str = Form("", description="Prefill OCR lines JSON string"),
+    engine: str = Form("", description="OCR engine yang dipakai (e.g. rapidocr)"),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
     effective_key = _extract_api_key(request, x_api_key)
@@ -537,32 +540,80 @@ async def create_reference(
         image_payload = {"stored_filename": stored_filename, "thumb_filename": thumb_filename}
 
     now = _now_iso()
+    has_prefilled_ocr = bool(cleaned_text and cleaned_text.strip())
+    if has_prefilled_ocr:
+        ocr_clean = cleaned_text.strip()
+        norm = normalize_text(ocr_clean)
+        th = text_hash(norm)
+        lines_parsed = []
+        if lines_json and lines_json.strip():
+            try:
+                lj = json.loads(lines_json.strip())
+                if isinstance(lj, list):
+                    lines_parsed = lj
+            except Exception:
+                lines_parsed = []
+        if not lines_parsed and ocr_clean:
+            lines_parsed = [ln.strip() for ln in ocr_clean.splitlines() if ln.strip()]
+
+        insert_payload = {
+            "ref_id": ref_id,
+            "name": clean_name,
+            "template_id": clean_template,
+            "side": clean_side,
+            "source": (source or "").strip(),
+            "user_id": (user_id or "").strip(),
+            **image_payload,
+            "sha256": sha,
+            "text_hash": th,
+            "cleaned_text": ocr_clean,
+            "lines_json": json.dumps(lines_parsed, ensure_ascii=False),
+            "engine": (engine or "rapidocr").strip(),
+            "ocr_status": "success",
+            "is_empty": False,
+            "error": "",
+            "file_size_bytes": file_size,
+            "processing_time_seconds": 0.01,
+            "usage_count": 0,
+            "created_at": now,
+            "updated_at": now,
+            "last_used_at": "",
+        }
+        if _USE_MYSQL:
+            if clean_side == "back":
+                insert_payload["cleaned_text_back"] = ocr_clean
+                insert_payload["lines_json_back"] = json.dumps(lines_parsed, ensure_ascii=False)
+                insert_payload["has_back"] = True
+            else:
+                insert_payload["cleaned_text_front"] = ocr_clean
+                insert_payload["lines_json_front"] = json.dumps(lines_parsed, ensure_ascii=False)
+    else:
+        insert_payload = {
+            "ref_id": ref_id,
+            "name": clean_name,
+            "template_id": clean_template,
+            "side": clean_side,
+            "source": (source or "").strip(),
+            "user_id": (user_id or "").strip(),
+            **image_payload,
+            "sha256": sha,
+            "text_hash": "",
+            "cleaned_text": "",
+            "lines_json": "[]",
+            "engine": "",
+            "ocr_status": "pending",
+            "is_empty": False,
+            "error": "",
+            "file_size_bytes": file_size,
+            "processing_time_seconds": 0,
+            "usage_count": 0,
+            "created_at": now,
+            "updated_at": now,
+            "last_used_at": "",
+        }
+
     try:
-        insert_ref(
-            {
-                "ref_id": ref_id,
-                "name": clean_name,
-                "template_id": clean_template,
-                "side": clean_side,
-                "source": (source or "").strip(),
-                "user_id": (user_id or "").strip(),
-                **image_payload,
-                "sha256": sha,
-                "text_hash": "",
-                "cleaned_text": "",
-                "lines_json": "[]",
-                "engine": "",
-                "ocr_status": "pending",
-                "is_empty": False,
-                "error": "",
-                "file_size_bytes": file_size,
-                "processing_time_seconds": 0,
-                "usage_count": 0,
-                "created_at": now,
-                "updated_at": now,
-                "last_used_at": "",
-            }
-        )
+        insert_ref(insert_payload)
     except DuplicateRefError as e:
         # Race duplikat (UNIQUE sha256, mode mysql) → return existing seperti dedup lapis 1
         dup = None
@@ -608,6 +659,24 @@ async def create_reference(
         except Exception:
             pass
         return JSONResponse(status_code=500, content={"success": False, "message": "Failed to save reference", "error": "internal_error"})
+
+    if has_prefilled_ocr:
+        print(f"[REFERENCES] saved {ref_id} name={clean_name!r} size={file_size}B (OCR prefilled, skipped background)")
+        return JSONResponse(
+            status_code=201,
+            content={
+                "success": True,
+                "ref_id": ref_id,
+                "name": clean_name,
+                "side": clean_side,
+                "ocr_status": "success",
+                "duplicate": False,
+                "poll_url": f"/api/references/{ref_id}",
+                "thumb_url": f"/api/references/{ref_id}/thumb",
+                "image_url": f"/api/references/{ref_id}/image",
+            },
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"},
+        )
 
     print(f"[REFERENCES] saved {ref_id} name={clean_name!r} size={file_size}B (OCR queued)")
     background_tasks.add_task(_ocr_reference_background, ref_id)
