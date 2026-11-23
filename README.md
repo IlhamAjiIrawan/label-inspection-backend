@@ -1,58 +1,79 @@
 # Label Inspection Backend (FastAPI)
 
-Service FastAPI untuk **OCR label + callback ke Laravel**, **Check Batch 4–5 gambar**, **compare similarity teks**, dan **Reference Library label acuan**. Berjalan CPU-only di port `9000`, terintegrasi dengan Laravel (`:8000`) sebagai upstream.
+Service FastAPI untuk **Auto-Detect & Auto-Deskew Label Berbasis OpenCV (Opsi C)**, **Multi-Model OCR + Callback ke Laravel**, **Check Batch 4 Slot Paralel**, **Dual Similarity Engine (RapidFuzz & Gemini Flash AI)**, dan **Reference Library Label Acuan**. Berjalan secara efisien di CPU pada port `9000`, terintegrasi penuh dengan Laravel (`:8000`) sebagai upstream.
 
-> Dokumen planning (`plans/*.md`, `SETUP.md`) **tidak di-commit** ke repo — semuanya dipindahkan sebagai **GitHub Issues** berlabel `documentation` (39 issues). Lihat tab Issues untuk riwayat desain.
+> Dokumen planning (`plans/*.md`, `SETUP.md`) **tidak di-commit** ke repo — semuanya dipindahkan sebagai **GitHub Issues** berlabel `documentation`. Lihat tab Issues untuk riwayat desain.
 
 ---
 
-## 1. Fitur utama
+## 1. Fitur Utama
 
 | Area | Keterangan |
 |---|---|
-| OCR pipeline 10 tahap | Upload → validasi → simpan → preprocessing → OCR → parsing → store → GET → callback → reconcile |
-| Engine OCR | Multi-model selectable via `OCR_ENGINE`: `paddle` (RapidOCR ONNX, default), `vitstr` (ViTSTR-Tiny Transformer), `surya` (Surya OCR SegFormer/Transformer), dan `tesseract` (fallback) |
-| Callback PUSH ke Laravel | `cleaned_text` + HMAC-SHA256, retry 3x exponential, dead-letter, allowlist anti-SSRF |
-| Check Batch | `POST /api/check/captures` terima 4–5 gambar/batch + `POST /api/check/process` OCR batch + callback progresif per-slot |
-| Compare similarity | Reference vs slot (`rapidfuzz` default, fallback `difflib`), threshold 0.85, toleransi tanda baca, content-gate |
-| Reference Library | Label acuan permanen (`uploads/references/`), backend `sqlite` atau `mysql` via `REF_STORE` |
-| Rate limiting | POST burst 5/60s, GET 120/60s, DELETE 30/60s, process 10/60s — semua 429 menyertakan `Retry-After` + `X-RateLimit-*` |
-| Keamanan upload | Maks 5 MB, ekstensi + magic bytes, filename di-generate internal, anti path-traversal |
+| **OpenCV Auto-Detect & Deskew (Opsi C)** | Deteksi pita label otomatis (`POST /api/references/detect-regions`), Canny edge + morphological text fusion, *Short Axis Expansion* (`factor=1.18`, 25–35px margin), *4-Point Perspective Transform (Deskew)*, pemotongan pita continuous 2-in-1 tepat 50:50 (*Sobel Midpoint Cut*), dan *Inverse Mapping* ($M^{-1}$) untuk preview kotak hijau (*annotated bounding box*) |
+| **OCR Pipeline 10 Tahap** | Upload → validasi magic bytes → simpan → preprocessing → OCR (Cascade Small→Medium) → parsing → store → GET → callback → reconcile |
+| **Multi-Model OCR Engine** | Selectable via `OCR_ENGINE`: `paddle` (RapidOCR ONNX, default produksi), `vitstr` (ViTSTR-Tiny Transformer), `surya` (Surya OCR SegFormer/Transformer), dan `tesseract` (fallback) |
+| **Arsitektur Model Cascade** | Eksekusi super cepat dengan model `small` (~1.0 dtk/gambar); otomatis eskalasi (*cascade*) ke model `medium` hanya bila skor confidence `< 0.88` (`OCR_CASCADE_ENABLED=true`) |
+| **Check Batch Paralel** | `POST /api/check/captures` terima 4–5 gambar/batch + `POST /api/check/process` eksekusi OCR paralel multi-worker (`CHECK_OCR_MAX_WORKERS=2`) + callback progresif instan per-slot via `as_completed()` (~4–6 detik total 4 slot) |
+| **Reference Library & Prefill OCR** | Label acuan permanen (`uploads/references/`), backend `sqlite` atau `mysql` via `REF_STORE`. Mendukung **Prefill OCR** (`cleaned_text`, `lines_json`, `engine`) dari tahap preview sehingga penyimpanan acuan instan (<0.5 dtk) tanpa duplikasi background re-OCR |
+| **Dual Compare Similarity** | 1) **RapidFuzz** (Levenshtein + Line F1, threshold 0.85, toleransi tanda baca, content-gate) <br/>2) **Gemini Flash AI** (Visual & Semantic comparison: klasifikasi *Critical Diffs* vs *Minor Diffs*) |
+| **Callback PUSH ke Laravel** | `cleaned_text` + HMAC-SHA256, retry 3x exponential, dead-letter, allowlist anti-SSRF |
+| **Rate Limiting Ramah Paralel** | POST burst `20/60s` (mendukung dual-slot paralel front+back tanpa 429), GET `120/60s`, DELETE `30/60s`, process `10/60s` — semua 429 menyertakan `Retry-After` + `X-RateLimit-*` |
+| **Keamanan Upload** | Maks 5 MB, sinkronisasi ketat ekstensi file + magic bytes (PNG/JPEG), filename di-generate internal, anti path-traversal |
 
 ---
 
-## 2. Arsitektur & alur
+## 2. Arsitektur & Alur
 
 ```
-Laravel (:8000)  ──POST image──>  FastAPI (:9000) ──BackgroundTasks──> OCR ──PUSH──> Laravel callback
-     │                                   │                                              │
-     │  GET /api/test/ocr/{fn} (poll)    │  uploads/*.png + metadata.json               │ HMAC verify
-     │  DELETE (retakeCleanup)           │  ocr_store memory LRU + disk (opsional)      │ simpan hasil
+Laravel (:8000) ──POST detect-regions──> FastAPI (:9000) [OpenCV Deskew + 50:50 Midpoint Cut + Box Hijau]
+     │
+     ├──POST image (parallel slot 1&2)─> FastAPI (:9000) ──BackgroundTasks──> OCR (Small/Cascade) ──PUSH──> Laravel callback
+     │  GET /api/test/ocr/{fn} (poll)    uploads/*.png + metadata.json                                      HMAC verify
+     │
+     ├──POST /api/references (prefill)─> Simpan instan ke Reference Library (ocr_status="success", lewati re-OCR)
+     │
+     └──POST /api/check/captures + process ──> ThreadPoolExecutor (2 Workers) ──Progressive Callback per Slot──> Laravel
 ```
 
-### 2.1 Pipeline OCR single capture (10 tahap, `main.py`)
+### 2.1 Modul Visi Komputer: OpenCV Auto-Detect & Deskew (`app/vision/label_detector.py`)
 
-1. **Validasi** — ukuran ≤ 5 MB, ekstensi `png/jpg/jpeg`, magic bytes PNG/JPEG (`app/security.py:validate_image_file`).
+Digunakan pada tahap **Tambah Reference** maupun **Check Label** (`POST /api/references/detect-regions`):
+1. **Grayscale & Canny Edge Detection (30, 100):** Mengabaikan 4% margin tepi luar frame kamera.
+2. **Morphological Rect Close:** Menggabungkan baris-baris teks menjadi kontur lempengan pita label utuh.
+3. **Short Axis Expansion (`expand_rect_short_axis`, factor=1.18):** Memperlebar sumbu pendek pita secara simetris sebesar 18% dari titik pusatnya untuk memberi ruang napas (*breathing room* 25–35 px) di sisi kiri & kanan agar huruf tepi (seperti `"PT:"`, `"FR:"`) tidak terpotong.
+4. **4-Point Perspective Transform (Deskew):** Meluruskan pita label yang miring menjadi tegak lurus.
+5. **Klasifikasi & Sobel Midpoint Cut:**
+   - **Kasus A (Pita Continuous 2-in-1):** Profil energi Sobel menentukan batas atas/bawah pita, lalu membelah tepat 50:50 (`mid = (y_min + y_max) // 2`) dengan mempertahankan lebar penuh sumbu pendek (`keep_full_short_axis=True`).
+   - **Kasus B (2 Label Terpisah):** Memisahkan dua kontur label independen menjadi Slot 1 & Slot 2.
+   - **Kasus C (Fallback):** Adaptive center crops jika kontur tidak terbaca jelas.
+6. **Inverse Perspective Mapping ($M^{-1}$):** Memetakan kembali titik potong ke gambar asli untuk menggambar kotak hijau (*annotated preview*) dan mengembalikan gambar crop dalam format PNG Base64 murni (`ext="png"`).
+
+### 2.2 Pipeline OCR Single Capture (10 Tahap, `main.py`)
+
+1. **Validasi** — ukuran ≤ 5 MB, ekstensi `png/jpg/jpeg`, verifikasi ketat magic bytes PNG (`89 50 4E 47`) / JPEG (`FF D8 FF`) (`app/security.py:validate_image_file`).
 2. **Simpan** — nama file di-generate `label-{YYYYMMDD-HHMMSS}-{uuid8}[-front-1].{ext}`, tulis `uploads/`, update `metadata.json` atomik.
 3. **Deteksi** — pakai generated filename (bukan input client).
-4. **Preprocessing** — grayscale → CLAHE → autocontrast → upscale 2x → sharpen → medianBlur, fallback adaptiveThreshold (CPU-only, `app/ocr/preprocess.py`).
-5. **OCR Engine** — RapidOCR ONNX default (`app/ocr/paddle_engine.py`); Tesseract fallback (`app/ocr/engine.py`, `--psm 6`, fallback `11,3` bila blank).
+4. **Preprocessing** — grayscale → CLAHE → autocontrast → bicubic upscale 2x → sharpen → medianBlur 3x3 (`app/ocr/preprocess.py`).
+5. **OCR Engine** — RapidOCR ONNX default (`app/ocr/paddle_engine.py`) dengan model `small` + *cascade* otomatis ke `medium` bila confidence `< 0.88`; atau ViTSTR / Surya / Tesseract sesuai `OCR_ENGINE`.
 6. **Parsing** — strip, hapus baris kosong, pecah per baris; kontrak `'none'` = teks valid bila gambar memang tanpa teks (`app/ocr/parser.py`).
-7. **Store** — memory LRU (`OCR_MAX_MEMORY_RESULTS`, default 20) + disk JSON **hanya** bila `OCR_DISK_PERSIST=true` (`app/ocr/store.py`).
+7. **Store** — memory LRU (`OCR_MAX_MEMORY_RESULTS`, default 20) + disk JSON bila `OCR_DISK_PERSIST=true` (`app/ocr/store.py`).
 8. **GET** — hasil via `/api/test/ocr/latest` / `/api/test/ocr/{filename}` + flag `is_empty`/warning; long-poll `?wait=` s.d. `OCR_LONGPOLL_MAX_SECONDS`.
 9. **Callback PUSH** — kirim `cleaned_text` ke Laravel via `httpx` + HMAC + retry (`app/callback/`).
 10. **Reconcile** — Laravel bisa fallback `GET /ocr/latest` + trigger manual `POST /callback/retry`.
 
-### 2.2 Check Batch (4–5 gambar, `routers/check.py`)
+### 2.3 Check Batch Paralel (4–5 Gambar, `routers/check.py`)
 
-1. `POST /api/check/captures` — validasi `X-API-Key == CHECK_API_KEY`, `batch_code` regex `^[A-Za-z0-9\-_]+$`, 4–5 file, slot unik 1..5, MIME + magic + 5 MB/file, idempoten bila `batch_code` sudah ada.
-2. `POST /api/check/process` (alias `/api/check/ocr/process`) — OCR batch (serial default `CHECK_OCR_MAX_WORKERS=1`).
-3. Callback progresif per-slot + summary `batch_completed` bila `CHECK_OCR_PROGRESSIVE_CALLBACK=true` (default), atau borongan sinkron bila `false`.
-4. `POST /api/check/compare` — compare slot vs reference; `GET /api/check/compare/{batch}` baca hasil.
+1. `POST /api/check/captures` — validasi `X-API-Key == CHECK_API_KEY`, `batch_code` regex `^[A-Za-z0-9\-_]+$`, 4–5 file, slot unik 1..5, MIME + magic bytes + 5 MB/file, idempoten bila `batch_code` sudah ada.
+2. `POST /api/check/process` (alias `/api/check/ocr/process`) — memproses seluruh slot secara **paralel** menggunakan `ThreadPoolExecutor(max_workers=CHECK_OCR_MAX_WORKERS)` (default `2` workers).
+3. Callback progresif dikirim ke Laravel begitu masing-masing thread slot selesai (`as_completed`), memperbarui `batch.json` secara real-time, lalu diakhiri summary `batch_completed`.
+4. `POST /api/check/compare` — compare slot vs reference (RapidFuzz & opsional Gemini Flash AI); `GET /api/check/compare/{batch}` baca hasil.
 
-### 2.3 Reference Library (`routers/references.py`, `app/references/`)
+### 2.4 Reference Library dengan Prefill OCR (`routers/references.py`, `app/references/`)
 
-Scan-sekali-pilih-ulang: `POST /api/references` (kompres + OCR background) → `GET /api/references` (list + search) → `GET /{ref_id}` (detail/polling) → `/{ref_id}/image|thumb` → `DELETE /{ref_id}`. Storage terisolasi di `uploads/references/`, **kebal** terhadap `CLEANUP_RETAKE`. Backend dipilih via `REF_STORE=sqlite|mysql`.
+- **Deteksi Region (Opsi C):** `POST /api/references/detect-regions` menghasilkan `annotated_preview` dan `slots[]` (Slot 1 & Slot 2).
+- **Simpan Instan (Tanpa Triple-OCR):** `POST /api/references` menerima form opsional `cleaned_text`, `lines_json`, dan `engine` dari hasil OCR preview. Jika teks sudah tersedia, sistem langsung menyimpan ke database dengan `ocr_status="success"` dan **melewatkan antrean `_ocr_reference_background`**. Jika belum ada teks, background OCR dijalankan seperti biasa.
+- Storage terisolasi di `uploads/references/`, **kebal** terhadap `CLEANUP_RETAKE`. Backend dipilih via `REF_STORE=sqlite|mysql`.
 
 ---
 
@@ -60,10 +81,10 @@ Scan-sekali-pilih-ulang: `POST /api/references` (kompres + OCR background) → `
 
 | Kebutuhan | Detail |
 |---|---|
-| Python | **3.14.x** (terverifikasi 3.14.3). `opencv-python>=4.10` wajib di NumPy 2.x — jangan turunkan ke 4.8 |
+| Python | **Python 3.11 / 3.13 / 3.14** (terverifikasi pada Laragon Python 3.13 & venv). `opencv-python>=4.10` wajib di NumPy 2.x — jangan turunkan ke 4.8 |
 | OS | Windows 10/11 atau Linux. Path Tesseract default Windows di `app/config.py:TESSERACT_CANDIDATE_PATHS` |
 | Tesseract | Opsional (hanya bila `OCR_ENGINE=tesseract` atau fallback R10). Installer UB Mannheim, centang `eng` |
-| MySQL | Opsional, hanya bila `REF_STORE=mysql` (default `sqlite`, tanpa dependensi tambahan) |
+| MySQL | Direkomendasikan (`REF_STORE=mysql` pada database `label_inspection`), atau `sqlite` untuk mode standalone |
 | Laravel upstream | Default `http://127.0.0.1:8000` (callback + check). Bisa dimatikan via `CALLBACK_ENABLED=false` untuk testing mandiri |
 
 ---
@@ -82,21 +103,19 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1        # Linux: source .venv/bin/activate
 pip install -r requirements.txt
 
-# 3. (Opsional) Tesseract bila pakai engine tesseract
-"C:\Program Files\Tesseract-OCR\tesseract.exe" --version
-
-# 4. Konfigurasi environment
+# 3. Konfigurasi environment
 copy .env.example .env              # Linux: cp .env.example .env
 # Edit .env — isi API key/HMAC, sinkron dengan Laravel (lihat §5)
 
-# 5. Jalan
+# 4. Jalankan server
 python main.py
-# atau: uvicorn main:app --host 0.0.0.0 --port 9000
+# Atau menggunakan Laragon Python 3.13 secara langsung:
+# C:\laragon\bin\python\python-3.13\python.exe main.py
 ```
 
-> **PENTING:** tetap `uvicorn --workers 1`. Store OCR, rate-limit, dan antrean ada di memori per-proses; konkurensi diatur via `OCR_WORKERS` (ThreadPool), bukan multi-proses. `OCR_WORKERS=2` + `OCR_ORT_INTRA_THREADS=auto` ideal untuk 6 core.
+> **PENTING:** tetap `uvicorn --workers 1`. Store OCR, rate-limit, dan antrean ada di memori per-proses; konkurensi diatur via `OCR_WORKERS=2` dan `CHECK_OCR_MAX_WORKERS=2` (ThreadPool dengan Thread-Local ONNX Session), bukan multi-proses.
 
-Verifikasi:
+Verifikasi kesehatan service:
 
 ```powershell
 curl.exe -s http://127.0.0.1:9000/health
@@ -105,85 +124,28 @@ curl.exe -s http://127.0.0.1:9000/
 
 ### 4.2 Manajemen Multi Virtual Environment (Switching Model OCR)
 
-Backend ini mendukung beberapa engine OCR (*Multi-Modal*). Untuk menghindari konflik dependensi antara PyTorch, ONNX Runtime, dan SegFormer/Transformers, project ini memisahkan lingkungan Python ke dalam virtual environment masing-masing:
+Backend ini mendukung beberapa engine OCR (*Multi-Model*). Untuk menghindari konflik dependensi antara PyTorch, ONNX Runtime, dan SegFormer/Transformers, lingkungan Python dapat dipisahkan ke dalam virtual environment masing-masing:
 
 | Model / Engine | Nilai `OCR_ENGINE` | Virtual Environment | Karakteristik Utama |
 |---|---|---|---|
-| **RapidOCR ONNX** *(Default)* | `paddle` | `.venv` | Ringan, CPU-friendly (~1–4s), default PP-OCRv6 |
-| **ViTSTR-Tiny** | `vitstr` | `.venv-vitstr` | Vision Transformer (STR Hub PyTorch), ultra-cepat |
-| **Surya OCR** | `surya` | `.venv-surya` | SegFormer + Transformer, presisi tinggi multilingual |
+| **RapidOCR ONNX** *(Default Produksi)* | `paddle` | `.venv` | Ringan, CPU-friendly (~1.0 dtk/slot dengan model `small` + cascade `medium`), PP-OCRv4/v6 |
+| **ViTSTR-Tiny** | `vitstr` | `.venv-vitstr` | Vision Transformer (STR Hub PyTorch), pengenalan kata ultra-cepat |
+| **Surya OCR** | `surya` | `.venv-surya` | SegFormer + Transformer, akurasi sangat tinggi untuk 90+ bahasa & simbol |
 | **Tesseract** | `tesseract` | `.venv` | Fallback engine legacy via binary Tesseract OCR |
 
 #### Cara Mengganti Virtual Environment & Model:
 
-Saat ingin berganti engine:
-
-1. **Nonaktifkan venv aktif** (jika ada):
-   ```powershell
-   deactivate
-   ```
-
+1. **Nonaktifkan venv aktif** (jika ada): `deactivate`
 2. **Aktifkan Virtual Environment tujuan**:
-   - Jika ingin menggunakan **ViTSTR**:
-     ```powershell
-     .\.venv-vitstr\Scripts\Activate.ps1
-     ```
-   - Jika ingin menggunakan **Surya OCR**:
-     ```powershell
-     .\.venv-surya\Scripts\Activate.ps1
-     ```
-   - Jika ingin kembali ke **RapidOCR (Default)** / **Tesseract**:
-     ```powershell
-     .\.venv\Scripts\Activate.ps1
-     ```
-
+   - RapidOCR / Tesseract: `.\.venv\Scripts\Activate.ps1`
+   - ViTSTR: `.\.venv-vitstr\Scripts\Activate.ps1`
+   - Surya OCR: `.\.venv-surya\Scripts\Activate.ps1`
 3. **Ubah variabel `OCR_ENGINE` di file `.env`**:
-   Buka file `.env` dan ganti nilai `OCR_ENGINE`:
    ```ini
    # Pilihan: paddle | vitstr | surya | tesseract
-   OCR_ENGINE=surya
+   OCR_ENGINE=paddle
    ```
-
-4. **(Opsional) Validasi model secara mandiri**:
-   Jalankan skrip tes bawaan sebelum menyalakan server:
-   ```powershell
-   # Pengujian ViTSTR (.venv-vitstr):
-   python test_vitstr.py
-
-   # Pengujian Surya OCR (.venv-surya):
-   python test_surya.py
-   ```
-
-5. **Jalankan kembali FastAPI server**:
-   ```powershell
-   python main.py
-   ```
-
-#### Setup Virtual Environment Baru dari Awal (Jika Clone di Komputer Baru)
-
-Karena folder `.venv*` di-ignore oleh Git, jika Anda clone di mesin baru dan ingin mengaktifkan model tambahan, siapkan venv sebagai berikut:
-
-```powershell
-# 1. Setup .venv (RapidOCR + Base FastAPI)
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-deactivate
-
-# 2. Setup .venv-vitstr (ViTSTR / PyTorch)
-python -m venv .venv-vitstr
-.\.venv-vitstr\Scripts\Activate.ps1
-pip install -r requirements.txt
-pip install torch torchvision timm
-deactivate
-
-# 3. Setup .venv-surya (Surya OCR)
-python -m venv .venv-surya
-.\.venv-surya\Scripts\Activate.ps1
-pip install -r requirements.txt
-pip install surya-ocr
-deactivate
-```
+4. **Jalankan kembali FastAPI server**: `python main.py`
 
 ---
 
@@ -191,9 +153,9 @@ deactivate
 
 Salin `.env.example` → `.env`. **Jangan commit `.env`** (sudah di `.gitignore`). Semua perubahan ENV **butuh restart** service.
 
-### 5.1 Sinkronisasi wajib dengan Laravel
+### 5.1 Sinkronisasi Wajib dengan Laravel
 
-Tiga variabel ini **harus identik** dengan `.env` Laravel (sisi Laravel: `OCR_CALLBACK_API_KEY`, `LARAVEL_HMAC_SECRET`, `LARAVEL_CALLBACK_URL`):
+Tiga variabel ini **harus identik** dengan `.env` Laravel:
 
 | FastAPI | Laravel | Isi |
 |---|---|---|
@@ -201,278 +163,158 @@ Tiga variabel ini **harus identik** dengan `.env` Laravel (sisi Laravel: `OCR_CA
 | `LARAVEL_HMAC_SECRET` (fallback `OCR_CALLBACK_SECRET`) | `LARAVEL_HMAC_SECRET` | 64 char hex |
 | `LARAVEL_CALLBACK_URL` (fallback `OCR_CALLBACK_URL`) | `LARAVEL_CALLBACK_URL` | `http://127.0.0.1:8000/api/ocr/callback` |
 
-Generate baru (PowerShell):
+### 5.2 OCR Engine & Tuning RapidOCR (Optimasi Kecepatan Produksi)
 
-```powershell
--join ((48..57)+(65..90)+(97..122) | Get-Random -Count 32 | ForEach-Object {[char]$_})
--join ((48..57)+(97..102) | Get-Random -Count 64 | ForEach-Object {[char]$_})
-```
-
-### 5.2 OCR engine & tuning RapidOCR
-
-| Variabel | Default | Keterangan |
+| Variabel | Default Produksi | Keterangan |
 |---|---|---|
-| `OCR_ENGINE` | `paddle` | Pilihan model: `paddle` (RapidOCR ONNX default) \| `vitstr` (ViTSTR Transformer) \| `surya` (Surya OCR) \| `tesseract` (fallback lama) |
-| `OCR_DET_THRESHOLD` / `OCR_REC_THRESHOLD` | `0.5` / `0.5` | Ambang deteksi/recognition |
-| `OCR_MIN_TEXT_LEN` | `1` | Panjang teks minimum |
-| `OCR_MODEL_DIR` | kosong | Direktori model kustom (kosong = auto-download) |
-| `RAPIDOCR_REC_MODEL` | `medium` | `medium` akurat ~4–5 s (fix H→K) \| `small` cepat ~1 s |
+| `OCR_ENGINE` | `paddle` | Pilihan model: `paddle` (RapidOCR ONNX default) \| `vitstr` \| `surya` \| `tesseract` |
+| `RAPIDOCR_REC_MODEL` | `small` | `small` super cepat (~1 dtk/slot) \| `medium` (~3–4 dtk/slot) |
+| `OCR_CASCADE_ENABLED` | `true` | Aktifkan eskalasi otomatis `small` → `medium` jika confidence di bawah ambang |
+| `OCR_CASCADE_CONF` / `OCR_CASCADE_REC_MODEL` | `0.88` / `medium` | Ambang confidence cascade & model tujuan eskalasi |
 | `RAPIDOCR_REC_VERSION` / `RAPIDOCR_DET_VERSION` | `PP-OCRv6` | Versi model PP-OCR |
 | `RAPIDOCR_REC_LANG` | `en` | Bahasa recognition |
 | `RAPIDOCR_DET_MODEL` | `small` | `tiny` \| `small` \| `medium` |
 | `RAPIDOCR_BOX_THRESH` / `RAPIDOCR_TEXT_SCORE` | `0.5` | Threshold box & skor teks |
 | `RAPIDOCR_UNCLIP_RATIO` | `1.6` | Unclip ratio deteksi |
 
-### 5.3 Optimasi OCR R1–R10 (target 6-core)
+### 5.3 Optimasi Runtime & Konkurensi (R1–R10)
 
-| Variabel | Default | Keterangan |
+| Variabel | Default Produksi | Keterangan |
 |---|---|---|
-| `OCR_WARMUP` | `true` | Warm-up engine saat startup agar request pertama ≈ steady-state |
-| `OCR_MAX_SIDE_PX` | `1600` | Pre-resize sisi terpanjang (`0` = nonaktif). Turunkan 1280 → 960 bila `critical_lines` tetap lolos |
-| `OCR_DET_LIMIT_SIDE` | `960` | `Det.limit_side_len` RapidOCR |
-| `OCR_LONGPOLL_MAX_SECONDS` | `10` | Batas `GET /ocr/{fn}?wait=` |
-| `OCR_MAX_MEMORY_RESULTS` | `20` | Kapasitas LRU memory (dukung "Cek Lagi" tanpa capture ulang) |
-| `OCR_PENDING_FRESH_SECONDS` | `180` | Jendela redirect polling race (menutup frontend 120 s + Laravel 150 s) |
-| `OCR_WORKERS` / `OCR_QUEUE_MAX` | `2` / `20` | Thread OCR + batas antrean (penuh → `503 + Retry-After: 3`) |
+| `OCR_WARMUP` | `true` | Warm-up engine saat startup agar request pertama langsung cepat |
+| `OCR_MAX_SIDE_PX` | `1280` | Pre-resize sisi terpanjang gambar sebelum masuk pipeline OCR |
+| `OCR_DET_LIMIT_SIDE` | `736` | `Det.limit_side_len` DBNet RapidOCR (memangkas beban deteksi tanpa kehilangan baris teks) |
+| `OCR_WORKERS` / `OCR_QUEUE_MAX` | `2` / `20` | Worker thread OCR preview + kapasitas antrean |
 | `OCR_ORT_INTRA_THREADS` | `0` (= auto `core // workers`) | Thread ONNX intra-op; `OCR_ORT_INTER_THREADS` default `1` |
-| `OCR_CASCADE_ENABLED` / `OCR_CASCADE_CONF` / `OCR_CASCADE_REC_MODEL` | `false` / `0.90` / `medium` | Cascade small→medium selektif |
-| `OCR_USE_CLS` | `true` | Angle classifier (`false` lebih cepat tapi label terbalik gagal) |
-| `OCR_TESSERACT_TIMEOUT_SECONDS` / `OCR_TESSERACT_MAX_SIDE` | `10` / `2500` | Fallback Tesseract |
-| `OCR_TIMINGS_ENABLED` | `true` | Sertakan `timings/image_scale/ocr_config` di hasil |
-| `CALLBACK_WORKERS` | `2` | Pool callback terpisah (jangan samakan dengan `OCR_WORKERS`) |
-| `OCR_DISK_PERSIST` | `false` | `false` = memory saja (persistensi di Laravel); `true` = tulis JSON disk untuk debug offline |
+| `OCR_USE_CLS` | `true` | Angle classifier (`true` agar tahan terhadap label miring/terbalik) |
+| `OCR_LONGPOLL_MAX_SECONDS` | `10` | Batas `GET /ocr/{fn}?wait=` |
+| `OCR_MAX_MEMORY_RESULTS` | `20` | Kapasitas LRU memory |
+| `OCR_PENDING_FRESH_SECONDS` | `180` | Jendela redirect polling race |
+| `CALLBACK_WORKERS` | `2` | ThreadPool pengiriman webhook callback |
+| `OCR_DISK_PERSIST` | `false` | `false` = memory LRU saja; `true` = tulis JSON ke disk untuk debug |
 
-### 5.4 Compare similarity teks
+### 5.4 Retake Cleanup & Rate Limit (Anti-429 Paralel)
 
-| Variabel | Default | Keterangan |
+| Variabel | Default Produksi | Keterangan |
 |---|---|---|
-| `SIMILARITY_ENABLED` | `true` | Kill switch (`false` = callback jalan tanpa verdict) |
-| `SIMILARITY_PASS_THRESHOLD` | `0.85` | Skor ≥ threshold = PASS |
-| `SIMILARITY_CANONICAL_PUNCT` | `true` | Abaikan titik/koma/strip/spasi pada skor+diff |
-| `SIMILARITY_KEEP_DECIMAL` | `true` | Lindungi desimal (`1.5` vs `15` tetap beda) |
-| `SIMILARITY_ENGINE` | `rapidfuzz` | `rapidfuzz` (C++, default) \| `difflib` (rollback) |
-| `SIMILARITY_CONTENT_GATE` | `true` | Jatuhkan PASS→FAIL bila kata tak-terjelaskan > batas |
-| `SIMILARITY_MAX_ORPHAN_FRACTION` | `0.08` | Batas fraksi kata yatim |
-| `SIMILARITY_ORPHAN_SIM_MIN` | `0.6` | Kemiripan minimum agar yatim dianggap noise-OCR |
-
-### 5.5 Callback ke Laravel
-
-| Variabel | Default | Keterangan |
-|---|---|---|
-| `CALLBACK_ENABLED` | `true` | `false` untuk testing tanpa Laravel |
-| `CALLBACK_TIMEOUT_SECONDS` | `5.0` | Timeout HTTP (connect fixed 2 s) |
-| `CALLBACK_RETRIES` / `CALLBACK_RETRY_BACKOFF_BASE` | `3` / `2.0` | Retry 5xx/timeout/429: 2/4/8 s + jitter |
-| `CALLBACK_INCLUDE_RAW_TEXT` | `false` | `true` = kirim `raw_text` juga (boros) |
-| `CALLBACK_SEND_ON_FAILED` | `false` | `true` = kirim juga saat OCR failed (alert) |
-| `CALLBACK_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Allowlist anti-SSRF (kosongkan = disable) |
-
-Header callback: `X-API-Key`, `X-Timestamp` (TTL 5 mnt), `X-Signature: sha256=<hex>` dengan message `"{timestamp}.{canonical_json}"` (`app/callback/signer.py`). Payload: `event` (`ocr.completed`/`ocr.failed`), `filename`, `original_filename`, `cleaned_text`, `lines`, `status`, `engine`, `is_empty`, `processed_at`, `processing_time_seconds`, plus metadata (`source`, `template_*`, `check_session_id`, `label_slot`, `reference_id`). Gagal 3x → `uploads/callback_dead_letter.jsonl`; tiap attempt → `uploads/callback_log.jsonl` (rotate 10 MB).
-
-### 5.6 Retake cleanup & rate limit
-
-| Variabel | Default | Keterangan |
-|---|---|---|
-| `CLEANUP_RETAKE` | `true` | Tiap POST baru hapus file lama (hemat + anti-stale) |
-| `RETAIN_COUNT` | `5` | 5 = 1 sesi split (4 label) + 1 margin. Jangan `1` untuk alur split (merusak Label 1) |
-| `POST_RATE_LIMIT_REQUESTS` / `POST_RATE_LIMIT_WINDOW_SECONDS` | `5` / `60` | Burst capture (preview 2 + forward 2 + 1 retake) |
-| `GET_RATE_LIMIT_REQUESTS` / `GET_RATE_LIMIT_WINDOW_SECONDS` | `120` / `60` | Polling longgar (dual polling + thumbs aman) |
+| `CLEANUP_RETAKE` | `true` | Tiap POST baru membersihkan file sementara lama |
+| `RETAIN_COUNT` | `5` | Menyimpan 5 file terakhir (1 sesi split 4 label + 1 margin) |
+| `POST_RATE_LIMIT_REQUESTS` / `POST_RATE_LIMIT_WINDOW_SECONDS` | `20` / `60` | Dinaikkan ke **20 req/mnt** untuk mendukung auto-detect + dual-slot OCR paralel tanpa error 429 |
+| `GET_RATE_LIMIT_REQUESTS` / `GET_RATE_LIMIT_WINDOW_SECONDS` | `120` / `60` | Kuota polling longgar |
 | `DELETE_RATE_LIMIT_REQUESTS` / `DELETE_RATE_LIMIT_WINDOW_SECONDS` | `30` / `60` | Cleanup best-effort |
-| `OCR_LATEST_ALLOW_FILENAME_QUERY` | `true` | `GET /ocr/latest?filename=` spesifik anti-stale |
 
-### 5.7 Check Batch
+### 5.5 Check Batch & Multi-Worker
 
-| Variabel | Default | Keterangan |
+| Variabel | Default Produksi | Keterangan |
 |---|---|---|
-| `CHECK_API_KEY` | (fallback ke `LARAVEL_API_KEY` …) | Key khusus check, sinkron dengan Laravel `CHECK_EXTERNAL_API_KEY` |
-| `CHECK_UPLOAD_ROOT` | `uploads/check` | Root batch |
-| `CHECK_MAX_FILE_SIZE` | `5242880` | 5 MB/file |
-| `CHECK_ALLOWED_MIMES` | `image/png,image/jpeg` | MIME diizinkan |
-| `CHECK_OCR_ENABLED` / `CHECK_OCR_MAX_WORKERS` / `CHECK_OCR_TIMEOUT_SECONDS` | `true` / `1` / `15` | OCR batch (1 serial, 2 paralel) |
-| `CHECK_PROCESS_RATE_LIMIT_REQUESTS` / `CHECK_PROCESS_RATE_LIMIT_WINDOW_SECONDS` | `10` / `60` | Rate limit trigger process |
-| `CHECK_OCR_CALLBACK_ENABLED` / `CHECK_OCR_CALLBACK_URL` | `true` / `http://127.0.0.1:8000/api/check/ocr/callback` | Callback check (fallback otomatis dari URL utama) |
-| `CHECK_OCR_PROGRESSIVE_CALLBACK` | `true` | Streaming per-slot + summary (`false` = borongan, rollback) |
-| `CHECK_RETAIN_BATCHES` / `CHECK_CLEANUP_ON_CAPTURE` | `1` / `true` | Retensi batch (hemat storage) |
-| `CHECK_COMPARE_CALLBACK_URL` / `CHECK_COMPARE_CALLBACK_ENABLED` | `.../api/check/compare/callback` / `false` | Callback hasil compare (route Laravel mungkin belum ada → 404 hanya di-log) |
+| `CHECK_API_KEY` | (fallback ke `LARAVEL_API_KEY`) | Key khusus check, sinkron dengan Laravel `CHECK_EXTERNAL_API_KEY` |
+| `CHECK_OCR_ENABLED` | `true` | Aktifkan OCR pada batch check |
+| `CHECK_OCR_MAX_WORKERS` | `2` | **Eksekusi paralel 2 worker threads** untuk memproses 4 slot label dalam ~4–6 detik |
+| `CHECK_OCR_TIMEOUT_SECONDS` | `15` | Timeout per slot |
+| `CHECK_OCR_PROGRESSIVE_CALLBACK` | `true` | Kirim hasil tiap slot seketika saat selesai (`as_completed`) + summary akhir |
+| `CHECK_RETAIN_BATCHES` / `CHECK_CLEANUP_ON_CAPTURE` | `1` / `true` | Retensi batch otomatis untuk menghemat ruang disk |
 
-Sinkron Laravel: `CHECK_EXTERNAL_URL=http://127.0.0.1:9000/api/check/captures`.
+### 5.6 Compare Similarity (RapidFuzz & Gemini Flash AI) & Reference Store
 
-### 5.8 Gemini & Reference backend
-
-| Variabel | Default | Keterangan |
+| Variabel | Default Produksi | Keterangan |
 |---|---|---|
-| `GEMINI_API_KEY` / `GEMINI_MODEL` / `GEMINI_COMPARE_TIMEOUT` / `GEMINI_COMPARE_ENABLED` | kosong / `gemini-3.8-flash` / `30` / `false` | Visual compare **nonaktif** (mode OCR aktif). Jangan isi key di repo |
-| `REF_STORE` | `sqlite` | `sqlite` (file+SQLite) \| `mysql` (stateless, cutover via flag + restart) |
-| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_DB` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_POOL_SIZE` | `127.0.0.1` / `3306` / `label_inspection` / `root` / kosong / `5` | Password **hanya** di `.env`, tidak di `.env.example` |
-| `REF_MAX_IMAGE_DIM` / `REF_THUMB_DIM` / `REF_JPG_QUALITY` / `REF_THUMB_QUALITY` / `REF_MAX_COUNT` / `REF_MAX_BYTES_MB` | `1280` / `320` / `82` / `70` / `2000` / `2048` | Kompresi & kuota library |
+| `SIMILARITY_ENABLED` / `SIMILARITY_ENGINE` | `true` / `rapidfuzz` | Pencocokan teks deterministik super cepat (<5 ms) |
+| `SIMILARITY_PASS_THRESHOLD` | `0.85` | Skor ≥ 0.85 = PASS |
+| `GEMINI_COMPARE_ENABLED` / `GEMINI_MODEL` | `false` / `gemini-3.8-flash` | Opsional: komparasi visual & semantik multimodal (*Critical vs Minor Diffs*) |
+| `REF_STORE` | `mysql` (atau `sqlite`) | Penyimpanan metadata Reference Library (`mysql` berbagi DB `label_inspection`) |
 
 ---
 
-## 6. Menjalankan & endpoint
+## 6. Endpoint Utama
 
-Base URL: `http://127.0.0.1:9000`. Semua 429 mengembalikan `retry_after_seconds` + header `Retry-After`, `X-RateLimit-Limit/Remaining/Reset`.
+Base URL: `http://127.0.0.1:9000`.
 
-### 6.1 Single capture + OCR (`main.py`)
+### 6.1 OpenCV Auto-Detect & Reference Library (`/api/references`)
+
+| Method | Path | Fungsi |
+|---|---|---|
+| `POST` | `/api/references/detect-regions` | **OpenCV Auto-Detect & Deskew (Opsi C)**: menerima full frame kamera, mengembalikan `annotated_preview` (kotak hijau) + `slots` (crop PNG Base64 Label 1 & Label 2) |
+| `POST` | `/api/references` | Simpan acuan baru; mendukung form prefill `cleaned_text`, `lines_json`, `engine` untuk bypass background OCR (`ocr_status="success"` instan) |
+| `GET` | `/api/references` | List paginasi + pencarian acuan |
+| `GET` | `/api/references/stats` & `/health` | Statistik library & pengecekan koneksi DB |
+| `GET` | `/api/references/{ref_id}` | Detail acuan + hasil OCR |
+| `GET` | `/api/references/{ref_id}/image` & `/thumb` | Unduh gambar asli / thumbnail acuan |
+| `DELETE` | `/api/references/{ref_id}` | Hapus acuan dari library |
+
+### 6.2 Single Capture + OCR Preview (`main.py`)
 
 | Method | Path | Fungsi | Batas |
 |---|---|---|---|
-| `POST` | `/api/test/status` | Upload gambar + form → trigger OCR background | 5/60s |
-| `GET` | `/api/test/status` | Status terakhir (`?filename=` spesifik) | 120/60s |
-| `GET` | `/api/test/image/{filename}` | Download file (basename saja) | 120/60s |
-| `GET` | `/api/test/files` | List file + `ocr_status` | 120/60s |
-| `GET` | `/api/test/ocr/latest` | OCR terbaru (`?filename=`, anti-stale) | 120/60s |
-| `GET` | `/api/test/ocr/{filename}` | OCR per file; `?wait=8` long-poll | 120/60s |
-| `POST` | `/api/test/ocr/run` | Trigger manual file terbaru | 5/60s |
+| `POST` | `/api/test/status` | Upload gambar slot + form (`template_id` mendukung `S,M,L,XL,TL,AUTO`) → trigger OCR background | 20/60s |
+| `GET` | `/api/test/ocr/{filename}` | Ambil hasil OCR per file (`?wait=0` non-blocking atau `?wait=8` long-poll) | 120/60s |
+| `GET` | `/api/test/ocr/latest` | Hasil OCR terbaru (`?filename=` spesifik anti-stale) | 120/60s |
 | `DELETE` | `/api/test/ocr/{filename}` | Hapus image + JSON + metadata + memory (`X-API-Key`) | 30/60s |
-| `DELETE` | `/api/test/status?filename={fn}` | Alias hapus via query | 30/60s |
-| `DELETE` | `/api/test/status/{filename}` | Alias hapus via path | 30/60s |
-| `POST` | `/api/test/ocr/{filename}/callback/retry` | Replay callback | 5/60s |
-| `GET` | `/api/test/callback/logs?limit=20` | Log callback terakhir | 120/60s |
-| `GET` | `/api/test/callback/dead-letter?limit=20` | Dead letter (gagal 3x) | 120/60s |
-| `GET` | `/api/test/result/{filename}`, `/api/ocr/*` | Alias kompatibilitas | sama |
-| `GET` | `/health` | Status engine, callback, antrean, rate limit (tanpa secret) | — |
-| `GET` | `/` | `{"message":"External Service is running"}` | — |
+| `GET` | `/health` | Status engine, konfigurasi cascade, antrean, rate limit, dan statistik callback | — |
 
-Form `POST /api/test/status` (multipart, semua wajib kecuali 3 terakhir opsional): `image` (PNG/JPEG ≤ 5 MB), `source`, `timestamp`, `template_id`, `template_name`, `template_width`, `template_height`, `filename`, `resolution_w`, `resolution_h`, `filesize`, `check_session_id?`, `label_slot?` (`1`/`2`), `reference_id?`.
-
-```powershell
-curl.exe -s -X POST http://127.0.0.1:9000/api/test/status `
-  -F image=@label.png -F source=label-inspection -F timestamp=2026-10-12T10:00:00+07:00 `
-  -F template_id=TL -F template_name=Test -F template_width=100 -F template_height=50 `
-  -F filename=label.png -F resolution_w=600 -F resolution_h=400 -F filesize=12671
-# -> {"success":true,"filename":"label-20261012-100000-a1b2c3d4.png","ocr_status":"pending"}
-curl.exe -s "http://127.0.0.1:9000/api/test/ocr/label-20261012-100000-a1b2c3d4.png?wait=8"
-```
-
-**Polling ideal:** simpan `filename` dari response POST, lalu poll **1 URL spesifik** (`GET /ocr/{saved}` tiap 3 s × 10). Jangan fetch 6 URL/poll. Hormati `Retry-After` dengan backoff 2/4/8 s + jitter.
-
-### 6.2 Check Batch (`/api/check`)
+### 6.3 Check Batch (`/api/check`)
 
 | Method | Path | Fungsi |
 |---|---|---|
-| `POST` | `/api/check/captures` | Terima 4–5 gambar (`images[]` + `batch_code` + `slot_numbers`) |
-| `POST` | `/api/check/process` (alias `/api/check/ocr/process`) | Trigger OCR batch |
-| `GET` | `/api/check/ocr/{batch_code}` | Hasil OCR batch |
-| `GET` | `/api/check/ocr/{batch_code}/slot/{n}` | Hasil per slot |
-| `GET` | `/api/check/latest` | Batch terbaru |
-| `POST` | `/api/check/compare` | Compare batch vs reference |
-| `GET` | `/api/check/compare/{batch_code}` | Hasil compare |
-
-### 6.3 Reference Library (`/api/references`)
-
-| Method | Path | Fungsi |
-|---|---|---|
-| `POST` | `/api/references` | Simpan acuan baru (rate limit sendiri 10/mnt) |
-| `GET` | `/api/references` | List paginasi + search |
-| `GET` | `/api/references/stats` | Statistik |
-| `GET` | `/api/references/health` | Ping DB |
-| `POST` | `/api/references/from-capture` | Promosikan file `uploads/` lama |
-| `GET` | `/api/references/{ref_id}` | Detail + polling OCR |
-| `GET` | `/api/references/{ref_id}/image` | Gambar asli (cache 1 hari) |
-| `GET` | `/api/references/{ref_id}/thumb` | Thumbnail (cache 1 hari) |
-| `DELETE` | `/api/references/{ref_id}` | Hapus |
+| `POST` | `/api/check/captures` | Terima 4–5 gambar slot hasil Auto-Detect (`images[]` + `batch_code` + `slot_numbers`) |
+| `POST` | `/api/check/process` | Trigger OCR batch paralel (`ThreadPoolExecutor` 2 workers + progressive webhook callback) |
+| `GET` | `/api/check/ocr/{batch_code}` | Hasil OCR seluruh slot dalam batch |
+| `POST` | `/api/check/compare` | Compare batch terhadap reference |
+| `GET` | `/api/check/compare/{batch_code}` | Hasil compare batch |
 
 ---
 
-## 7. Struktur folder
+## 7. Struktur Folder
 
 ```
 .
-├── main.py                 # app + pipeline OCR + endpoint /api/test/* + /health
+├── main.py                 # Entrypoint FastAPI + pipeline OCR + endpoint /api/test/* + /health
 ├── app/
-│   ├── config.py           # semua ENV + default (satu tempat)
-│   ├── security.py         # validasi, sanitasi, rate-limit sliding window
+│   ├── config.py           # Konfigurasi ENV & default terpusat
+│   ├── security.py         # Validasi ekstensi & magic bytes, sanitasi path, sliding-window rate limiter
 │   ├── storage.py          # metadata.json atomik, cleanup retake, resolve filename
-│   ├── db_mysql.py         # backend MySQL reference
-│   ├── callback/           # signer (HMAC) + payload + client (retry/dead-letter)
-│   ├── ocr/                # preprocess, paddle_engine, engine (tesseract),
-│   │                       # dispatch, executor (R6), store (LRU+long-poll), parser
-│   ├── compare/            # visual compare Gemini (nonaktif default)
-│   ├── compare_text/       # similarity rapidfuzz/difflib + content-gate
-│   └── references/         # service + db SQLite reference library
+│   ├── db_mysql.py         # Backend MySQL untuk Reference Library
+│   ├── vision/
+│   │   └── label_detector.py # OpenCV Auto-Detect, Short Axis Expansion (1.18), Deskew, & 50:50 Midpoint Cut
+│   ├── callback/           # Signer (HMAC-SHA256) + payload + client (retry/dead-letter)
+│   ├── ocr/                # preprocess, paddle_engine (Small+Cascade), vitstr_engine,
+│   │                       # surya_engine, engine (tesseract), dispatch, executor, store, parser
+│   ├── compare/            # Visual & semantic compare via Gemini Flash AI
+│   ├── compare_text/       # Similarity RapidFuzz/difflib + content-gate
+│   └── references/         # Service & SQLite/MySQL repository untuk Reference Library
 ├── routers/
-│   ├── check.py            # /api/check/* (captures/process/compare)
-│   └── references.py       # /api/references/*
-├── scripts/                # bench_ocr, make_bench_images, migrate_* (sqlite→mysql, dual-side)
-├── tests/ocr_bench/        # dataset benchmark lokal (tidak di-commit)
-├── uploads/                # runtime (hanya .gitkeep yang di-commit)
-│   ├── ocr/                # hasil OCR (bila OCR_DISK_PERSIST=true)
-│   ├── check/              # batch check
-│   └── references/         # library permanen (kebal cleanup)
-├── test_*.py               # test manual: compare, similarity, paddle
+│   ├── check.py            # /api/check/* (captures, parallel process, compare)
+│   └── references.py       # /api/references/* (detect-regions, prefill store, library CRUD)
+├── scripts/                # bench_ocr, make_bench_images, migrate_*
+├── uploads/                # Direktori runtime (di-ignore oleh git)
+│   ├── check/              # Batch check produksi
+│   └── references/         # Gambar master reference permanen (kebal cleanup)
+├── test_*.py               # Suite pengujian unit & integrasi (similarity, compare, OCR engines)
 ├── requirements.txt
-├── .env.example            # template (tanpa secret asli)
-└── README.md               # file ini (satu-satunya .md yang di-commit)
+├── .env.example            # Template konfigurasi
+└── README.md
 ```
-
-Kebijakan git: `*.md` (kecuali `README.md`), `.env`, `*.bak`, `*.sql`, `baseline.json`, `*.zip`, `*.db`, dan seluruh isi runtime `uploads/` **di-ignore**. Lihat `.gitignore`.
 
 ---
 
-## 8. Testing & benchmark
+## 8. Testing & Verifikasi Sintaks
 
 ```powershell
 $env:PYTHONPATH='.'
-python test_similarity.py     # verdict PASS/FAIL/SKIP + assert <5 ms untuk 5 pasang
+python -m py_compile main.py app/config.py routers/references.py routers/check.py app/vision/label_detector.py
+python test_similarity.py     # Verdict PASS/FAIL/SKIP + assert <5 ms
 python test_compare.py
 python test_paddle_ocr.py
-python test_native_compare.py
-python -m compileall app main.py
-```
-
-Benchmark Fase 0 (observability R1–R10):
-
-```powershell
-$env:PYTHONPATH='.'
-python scripts/make_bench_images.py
-python scripts/bench_ocr.py --dir tests/ocr_bench --repeat 3 --out baseline.json --batch5
-python scripts/bench_ocr.py --dir tests/ocr_bench --repeat 3 --compare baseline.json
-```
-
-Migrasi reference:
-
-```powershell
-python scripts/migrate_library_sqlite_to_mysql.py
-python scripts/migrate_ref_dual_side.py
-python scripts/migrate_ref_add_side.py
 ```
 
 ---
 
-## 9. Keamanan
+## 9. Troubleshooting
 
-- Validasi berlapis: 5 MB (`app/config.py`), ekstensi + magic bytes (`app/security.py`), filename generate internal + `is_safe_path()` + `sanitize_filename_for_lookup()`.
-- DELETE verifikasi `X-API-Key == LARAVEL_API_KEY` (timing-safe); tanpa key terkonfigurasi = mode dev longgar (jangan di production).
-- Callback: HMAC-SHA256 + `X-Timestamp` TTL 5 mnt + allowlist host anti-SSRF + timeout + retry + dead-letter; 401 tidak di-retry (ada hint log sinkronisasi key).
-- Secret hanya via `.env` (tidak pernah di-commit); `.env.example` berisi placeholder. Bila key pernah bocor di histori/Issues, **rotasi segera**.
-- Tidak ada `eval`/`exec` input user; tidak ada traceback internal ke client.
-- `uploads/` + `sql/` dump + `*.bak` tidak di-commit (data runtime/dump bisa sensitif).
-
----
-
-## 10. Troubleshooting
-
-| Gejala | Penyebab umum | Solusi |
+| Gejala | Penyebab Umum | Solusi |
 |---|---|---|
-| `tesseract_available:false` di `/health` | Path Tesseract salah / `eng` tidak terinstal | Reinstall UB Mannheim + `eng`; cek `TESSERACT_CANDIDATE_PATHS` |
-| Semua OCR gagal `rapidocr/onnxruntime belum install` | `opencv-python` 4.8 di NumPy 2.x | `pip install "opencv-python>=4.10"` (jangan 4.8) |
-| `ModuleNotFoundError` | venv tidak aktif / deps belum install | Aktifkan venv → `pip install -r requirements.txt` |
-| Port 9000 dipakai | Proses lama masih jalan | `netstat -ano \| findstr :9000` → `taskkill /PID <PID> /F` |
-| `404 No status data` / OCR kosong | Belum ada POST sukses / memory reset setelah restart | POST dulu; `OCR_DISK_PERSIST=true` bila butuh persistensi disk |
-| Callback `401` | Key/HMAC tidak sinkron Laravel ↔ FastAPI | Samakan 3 variabel §5.1; cek `callback_log.jsonl` + `/health.callback_401_count` |
-| `429` POST | Spam >5/mnt | Tunggu `Retry-After`; alur normal front+back tidak kena |
-| `429` GET | Poll 6 URL/poll atau paralel berlebih | Poll 1 URL spesifik, 3 s × 10; backoff 2/4/8 s + jitter |
-| `503 OCR queue full` | `OCR_WORKERS`/`OCR_QUEUE_MAX` jenuh batch 5 | Retry setelah 3 s; naikkan worker sesuai core (tetap `--workers 1`) |
-| Label terbalik gagal | `OCR_USE_CLS=false` | Set `true` + restart |
-| Frontend 120 s / Laravel 150 s timeout | Memory LRU kecil / pending basi | `OCR_MAX_MEMORY_RESULTS=20`, `OCR_PENDING_FRESH_SECONDS=180` + restart |
-| `paddleocr` tidak bisa install di Py 3.14 | Belum ada wheel `paddlepaddle` | Jangan tambah `paddleocr` (verdict RED); pakai `RAPIDOCR_REC_MODEL=medium` |
-| `*.md` hilang setelah clone | By design → Issues | Baca tab GitHub Issues (`documentation`) |
-
----
-
-## 11. Catatan operasional
-
-- **Satu-satunya config surface adalah `.env`** (`app/config.py` hanya default). Semua flag butuh **restart**.
-- Jangan jalankan `uvicorn --workers >1`.
-- Log runtime: stdout + `uploads/callback_log.jsonl` + `uploads/callback_dead_letter.jsonl` + `GET /api/test/callback/logs|dead-letter`.
-- `GET /health` adalah dashboard tanpa secret: engine, tuning aktif, antrean, rate limit, 401/empty/failed counters.
-- Backup yang perlu: `.env` (rahasia, di luar git) + `uploads/references/` atau MySQL `label_inspection` bila pakai `REF_STORE=mysql`.
+| `400 File content does not match expected image format` | Ekstensi `.png` tetapi konten berformat JPEG (mismatch magic bytes) | Pastikan encoder citra (`detect-regions` / frontend canvas) menggunakan format `image/png` (`ext="png"`) yang konsisten dengan ekstensi nama file |
+| `404 Not Found` saat polling `/api/test/ocr/{filename}` | Upload sebelumnya gagal (misal ditolak 400/429) sehingga file tidak terdaftar di store | Cek response `POST /api/test/status`; pastikan kode `200 OK` dan magic bytes gambar valid |
+| `429 Too Many Requests` pada POST preview | `POST_RATE_LIMIT_REQUESTS` masih menggunakan nilai lama (`5`) | Set `POST_RATE_LIMIT_REQUESTS=20` di `.env` lalu restart FastAPI |
+| Callback ke Laravel timeout / lambat | `php artisan serve` memblokir koneksi karena `OCR_LONGPOLL_WAIT > 0` | Set `OCR_LONGPOLL_WAIT=0` pada `.env` Laravel agar server single-thread PHP tidak tertahan oleh request polling |
+| Semua OCR gagal `rapidocr/onnxruntime belum install` | `opencv-python` 4.8 di NumPy 2.x | `pip install "opencv-python>=4.10"` |
+| Callback `401 Unauthorized` | Key/HMAC tidak sinkron Laravel ↔ FastAPI | Samakan 3 variabel pada §5.1 di kedua `.env`, lalu restart service |

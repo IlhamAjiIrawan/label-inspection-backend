@@ -2458,13 +2458,14 @@ async def get_latest_batch(request: Request, x_api_key: Optional[str] = Header(N
 @router.delete("/cleanup")
 async def cleanup_check_uploads(
     request: Request,
-    days: int = Query(30, ge=0, description="Hapus folder batch yang usianya >= N hari (0 = semua batch)"),
+    days: int = Query(7, ge=0, description="Hapus folder batch & file OCR yang usianya >= N hari (default: 7 hari, 0 = semua)"),
     dry_run: bool = Query(False, description="Simulasi tanpa menghapus file fisik"),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ):
     """
-    Membersihkan subdirektori batch di uploads/check/ yang lebih tua dari N hari.
-    Retensi default: 30 hari.
+    Membersihkan subdirektori batch di uploads/check/ dan file JSON lama di uploads/ocr/
+    yang lebih tua dari N hari (default: 7 hari).
+    uploads/references/ (library global permanen) tidak pernah disentuh.
     """
     effective_key = x_api_key or request.headers.get("X-API-Key") or request.headers.get("x-api-key") or request.query_params.get("api_key")
     if CHECK_API_KEY and effective_key:
@@ -2481,6 +2482,7 @@ async def cleanup_check_uploads(
         skipped_batches = 0
         errors = []
 
+        # 1. Bersihkan subdirektori batch di uploads/check/
         if CHECK_UPLOAD_ROOT.exists():
             for p in CHECK_UPLOAD_ROOT.iterdir():
                 if not p.is_dir():
@@ -2519,6 +2521,34 @@ async def cleanup_check_uploads(
 
                 except Exception as ex:
                     errors.append(f"Gagal memproses batch {p.name}: {str(ex)}")
+
+        # 2. Bersihkan file JSON OCR lama di uploads/ocr/ (tanpa menyentuh uploads/references)
+        try:
+            from app.config import OCR_DIR
+            if OCR_DIR.exists() and is_safe_path(Path(__file__).resolve().parent.parent / "uploads", OCR_DIR):
+                for jf in OCR_DIR.glob("*.json"):
+                    if not jf.is_file():
+                        continue
+                    try:
+                        mtime = jf.stat().st_mtime
+                        age_seconds = now_ts - mtime
+                        if days > 0 and age_seconds < cutoff_seconds:
+                            continue
+                        fsize = 0
+                        try:
+                            fsize = jf.stat().st_size
+                        except Exception:
+                            pass
+
+                        if not dry_run:
+                            jf.unlink(missing_ok=True)
+
+                        deleted_files += 1
+                        freed_bytes += fsize
+                    except Exception as ocr_ex:
+                        errors.append(f"Gagal hapus OCR file {jf.name}: {str(ocr_ex)}")
+        except Exception as ocr_err:
+            errors.append(f"Gagal scan folder OCR: {str(ocr_err)}")
 
         return JSONResponse(
             status_code=200,
