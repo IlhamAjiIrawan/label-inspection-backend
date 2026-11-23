@@ -119,11 +119,12 @@ def _build_engine_params(rec_model_override: str | None = None) -> dict:
         return {}
 
 
-def active_model_label() -> dict:
+def active_model_label(rec_model_override: str | None = None) -> dict:
     """Label konfigurasi model aktif (untuk JSON/health, aditif, bukan path file)."""
+    rec_m = (rec_model_override or RAPIDOCR_REC_MODEL or "small").lower()
     return {
         "det_model": f"{RAPIDOCR_DET_VERSION}_det_{RAPIDOCR_DET_MODEL}",
-        "rec_model": f"{RAPIDOCR_REC_VERSION}_rec_{RAPIDOCR_REC_MODEL}",
+        "rec_model": f"{RAPIDOCR_REC_VERSION}_rec_{rec_m}",
         "rec_lang": RAPIDOCR_REC_LANG,
         "box_thresh": RAPIDOCR_BOX_THRESH,
         "text_score": RAPIDOCR_TEXT_SCORE,
@@ -144,57 +145,49 @@ def _build_engine(rec_model: str):
     return eng
 
 
-def get_ocr_engine():
-    """
-    Load singleton RapidOCR sekali (lazy, thread-safe) — LEGACY API.
+def _get_tls_engine(rec_model: str):
+    """Ambil atau inisialisasi instance RapidOCR per-model di thread ini."""
+    if not hasattr(_tls, "engines_by_model"):
+        _tls.engines_by_model = {}
+    model_key = (rec_model or "small").strip().lower()
+    if model_key not in _tls.engines_by_model:
+        with _engine_lock:
+            if model_key not in _tls.engines_by_model:
+                _tls.engines_by_model[model_key] = _build_engine(model_key)
+                logger.info(f"[OCR ENGINE] Loaded thread-local RapidOCR ({model_key})")
+    return _tls.engines_by_model[model_key]
 
-    Dipertahankan agar kode lama (yang memanggil get_ocr_engine langsung)
-    tetap jalan. Implementasi baru memakai _engines() thread-local;
-    fungsi ini mendelegasikan ke engine 'fast' thread ini.
-    """
+
+def get_ocr_engine():
+    """Load singleton RapidOCR sekali (lazy, thread-safe) — LEGACY API."""
     fast, _ = _engines()
     return fast
 
 
-def _engines():
+def _engines(rec_model_override: str | None = None, cascade_override: bool | None = None):
     """
-    Engine per thread (dibuat sekali per worker) — R1.
-
-    - fast: det+rec utama (small bila cascade ON, else RAPIDOCR_REC_MODEL).
-    - acc: model rec medium untuk verifikasi crop (hanya bila cascade ON).
+    Engine per thread dinamis — R1.
+    Mendukung pergantian profil runtime tanpa reload jika model sudah ter-cache di thread.
     """
-    if getattr(_tls, "fast", None) is not None:
-        return _tls.fast, getattr(_tls, "acc", None)
-    # Double-checked dengan lock global agar log tidak spam saat startup paralel.
-    with _engine_lock:
-        if getattr(_tls, "fast", None) is not None:
-            return _tls.fast, getattr(_tls, "acc", None)
-        try:
-            from app import config as _cfg
+    try:
+        from app.runtime_config import runtime_config
+        rc = runtime_config.get_config()
+        cascade_on = rc.get("ocr_cascade_enabled", False) if cascade_override is None else cascade_override
+        default_rec = rc.get("rapidocr_rec_model", "small")
+    except Exception:
+        cascade_on = bool(OCR_CASCADE_ENABLED) if cascade_override is None else cascade_override
+        default_rec = RAPIDOCR_REC_MODEL or "small"
 
-            cascade_on = bool(getattr(_cfg, "OCR_CASCADE_ENABLED", False))
-        except Exception:
-            cascade_on = False
-        fast_model = "small" if cascade_on else (RAPIDOCR_REC_MODEL or "small")
-        _tls.fast = _build_engine(fast_model)
-        try:
-            from app import config as _cfg2
+    fast_model = (rec_model_override or default_rec).strip().lower()
+    fast_engine = _get_tls_engine(fast_model)
 
-            if cascade_on:
-                _tls.acc = _build_engine(_cfg2.OCR_CASCADE_REC_MODEL or "medium")
-            else:
-                _tls.acc = None
-        except Exception:
-            _tls.acc = None
-        try:
-            lbl = active_model_label()
-            logger.info(
-                f"RapidOCR engine loaded (thread-local, CPU, {lbl['det_model']} + fast={fast_model} cascade={cascade_on})"
-            )
-            print(f"[OCR ENGINE] RapidOCR loaded (thread-local, det={lbl['det_model']}, fast={fast_model}, cascade={cascade_on})")
-        except Exception:
-            print("[OCR ENGINE] RapidOCR loaded (thread-local, CPU)")
-        return _tls.fast, _tls.acc
+    acc_engine = None
+    if cascade_on:
+        acc_engine = _get_tls_engine("medium")
+
+    _tls.fast = fast_engine
+    _tls.acc = acc_engine
+    return fast_engine, acc_engine
 
 
 def is_paddle_available() -> bool:
@@ -393,14 +386,13 @@ def _parse_output(output, timings_extra: dict | None = None) -> dict:
     try:
         from app import config as _cfg
 
-        cascade_on = bool(getattr(_cfg, "OCR_CASCADE_ENABLED", False))
-        cascade_conf = float(getattr(_cfg, "OCR_CASCADE_CONF", 0.90) or 0.90)
+        cascade_conf = float(getattr(_cfg, "OCR_CASCADE_CONF", 0.88) or 0.88)
     except Exception:
-        cascade_on, cascade_conf = False, 0.90
+        cascade_conf = 0.88
 
     # acc diambil dari thread-local (dibuat saat _engines).
     acc = getattr(_tls, "acc", None)
-    if cascade_on and acc is not None and rows:
+    if acc is not None and rows:
         # Butuh img untuk crop — disimpan di _tls sementara oleh extract_from_bytes.
         img_ref = getattr(_tls, "_last_img", None)
         for r in rows:
@@ -446,7 +438,11 @@ def _parse_output(output, timings_extra: dict | None = None) -> dict:
     return {"boxes": boxes_out, "lines_raw": lines_raw, "timings": timings}
 
 
-def extract_from_bytes(image_bytes: bytes) -> dict:
+def extract_from_bytes(
+    image_bytes: bytes,
+    rec_model: str | None = None,
+    cascade: bool | None = None,
+) -> dict:
     """
     Jalankan deteksi + recognisi dari bytes (R2+R3) — entry utama baru.
 
@@ -459,7 +455,7 @@ def extract_from_bytes(image_bytes: bytes) -> dict:
     img, scale = decode_and_limit(image_bytes, max_side)
     t_decode = time.perf_counter() - t0
 
-    fast, _ = _engines()
+    fast, _ = _engines(rec_model_override=rec_model, cascade_override=cascade)
     # Simpan ref untuk cascade crop (dibersihkan di _parse_output).
     try:
         _tls._last_img = img
@@ -479,7 +475,11 @@ def extract_from_bytes(image_bytes: bytes) -> dict:
     return parsed
 
 
-def extract_text_paddle(image_path: str | Path) -> dict:
+def extract_text_paddle(
+    image_path: str | Path,
+    rec_model: str | None = None,
+    cascade: bool | None = None,
+) -> dict:
     """
     Jalankan deteksi + recognisi pada file gambar.
 
@@ -492,9 +492,7 @@ def extract_text_paddle(image_path: str | Path) -> dict:
     try:
         data = Path(image_path).read_bytes()
     except Exception:
-        # Fallback: langsung ke engine via path bila file tak terbaca sebagai bytes
-        # (mis. path non-lokal). Perilaku lama tetap jalan.
-        fast, _ = _engines()
+        fast, _ = _engines(rec_model_override=rec_model, cascade_override=cascade)
         t1 = time.perf_counter()
         output = fast(
             str(image_path),
@@ -506,5 +504,5 @@ def extract_text_paddle(image_path: str | Path) -> dict:
         parsed = _parse_output(output, {"decode_s": None, "infer_s": round(t_infer, 4)})
         parsed["image_scale"] = 1.0
         return parsed
-    parsed = extract_from_bytes(data)
+    parsed = extract_from_bytes(data, rec_model=rec_model, cascade=cascade)
     return parsed

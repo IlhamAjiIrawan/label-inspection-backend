@@ -862,6 +862,16 @@ def _process_single_slot(batch_code: str, slot: int, image_path: Path, reference
         attempts = [f"rapidocr_det_rec({rec_model})"]
         used_pass = 1
         language = "en"
+    elif engine == "surya":
+        steps = ["surya_segformer_det3_rec2", "rgb_normalize"]
+        attempts = ["surya_multilingual"]
+        used_pass = 1
+        language = "en"
+    elif engine == "vitstr":
+        steps = ["vitstr_parseq_tiny", "resize_normalize"]
+        attempts = ["vitstr_strhub"]
+        used_pass = 1
+        language = "en"
     else:
         steps = ocr_out.get("preprocessing_steps", [])
         attempts = ocr_out.get("preprocessing_attempts", [])

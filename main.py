@@ -371,11 +371,21 @@ def _build_ocr_result_from_dispatch(ocr_out: dict, original_filename: str, saved
         preprocessing_attempts = [f"rapidocr_det_rec({rec_model})"]
         used_pass = 1
         print(f"[OCR] RapidOCR({rec_model}): {saved_filename} -> {len(cleaned['lines'])} lines, text_present={text_present}")
+    elif engine == "surya":
+        preprocessing_steps = ["surya_segformer_det3_rec2", "rgb_normalize"]
+        preprocessing_attempts = ["surya_multilingual"]
+        used_pass = 1
+        print(f"[OCR] Surya OCR: {saved_filename} -> {len(cleaned['lines'])} lines, text_present={text_present}")
+    elif engine == "vitstr":
+        preprocessing_steps = ["vitstr_parseq_tiny", "resize_normalize"]
+        preprocessing_attempts = ["vitstr_strhub"]
+        used_pass = 1
+        print(f"[OCR] ViTSTR-Tiny: {saved_filename} -> {len(cleaned['lines'])} lines, text_present={text_present}")
     else:
         preprocessing_steps = ocr_out.get("preprocessing_steps", ["grayscale", "clahe", "autocontrast", "upscale_2x", "sharpen", "medianBlur_3"])
         preprocessing_attempts = ocr_out.get("preprocessing_attempts", ["v1_psm6"])
         used_pass = ocr_out.get("preprocessed_pass", 1)
-        print(f"[OCR] Tesseract fallback: {saved_filename} -> {len(cleaned['lines'])} lines, pass {used_pass}")
+        print(f"[OCR] Tesseract: {saved_filename} -> {len(cleaned['lines'])} lines, pass {used_pass}")
 
     if engine == "rapidocr" and text_present is False:
         status = "success"
@@ -2279,6 +2289,77 @@ async def health():
             "idempotency": "duplicate batch_code returns 200 duplicate:true",
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Dynamic AI Model Settings (Dashboard Zero-Restart Switching)
+# ---------------------------------------------------------------------------
+class ModelSettingsPayload(BaseModel):
+    ocr_profile: Optional[str] = None
+    compare_profile: Optional[str] = None
+    updated_by: Optional[str] = "operator"
+
+
+@app.get("/api/settings/models")
+async def get_model_settings():
+    """Ambil model OCR & Similarity yang sedang aktif serta ketersediaan library sistem."""
+    from app.runtime_config import runtime_config
+    return {
+        "success": True,
+        "data": runtime_config.check_capabilities(),
+    }
+
+
+@app.post("/api/settings/models")
+async def update_model_settings(
+    payload: ModelSettingsPayload,
+    request: Request,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+):
+    """Update model OCR & Similarity aktif secara dinamis tanpa restart .env."""
+    effective_key = x_api_key or request.headers.get("x-api-key") or request.query_params.get("api_key")
+    if LARAVEL_API_KEY and effective_key:
+        if effective_key != LARAVEL_API_KEY and effective_key != globals().get("CHECK_API_KEY", ""):
+            return JSONResponse(status_code=401, content={"success": False, "message": "Invalid API Key"})
+
+    from app.runtime_config import runtime_config
+    caps = runtime_config.check_capabilities()
+
+    if payload.ocr_profile:
+        found_ocr = None
+        for p in caps["ocr_profiles"]:
+            if p["profile"] == payload.ocr_profile:
+                found_ocr = p
+                break
+        if not found_ocr:
+            return JSONResponse(status_code=422, content={"success": False, "message": f"Profil OCR '{payload.ocr_profile}' tidak dikenali."})
+        if not found_ocr["is_installed"]:
+            return JSONResponse(status_code=422, content={"success": False, "message": f"Model '{found_ocr['name']}' belum terpasang: {found_ocr['unavailable_reason']}"})
+
+    if payload.compare_profile:
+        found_comp = None
+        for p in caps["compare_profiles"]:
+            if p["profile"] == payload.compare_profile:
+                found_comp = p
+                break
+        if not found_comp:
+            return JSONResponse(status_code=422, content={"success": False, "message": f"Profil Compare '{payload.compare_profile}' tidak dikenali."})
+        if not found_comp["is_installed"]:
+            return JSONResponse(status_code=422, content={"success": False, "message": f"Engine Compare '{found_comp['name']}' belum siap: {found_comp['unavailable_reason']}"})
+
+    try:
+        new_cfg = runtime_config.set_config(
+            ocr_profile=payload.ocr_profile,
+            compare_profile=payload.compare_profile,
+            updated_by=payload.updated_by or "operator",
+        )
+        return {
+            "success": True,
+            "message": "Konfigurasi model AI berhasil diperbarui secara instan.",
+            "data": new_cfg,
+        }
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"success": False, "message": str(e)})
 
 
 @app.get("/")

@@ -35,15 +35,21 @@ except ImportError:
 def _use_rapidfuzz() -> bool:
     """True bila engine rapidfuzz aktif DAN library ter-install.
 
-    Kill switch via SIMILARITY_ENGINE (butuh restart). Bila rapidfuzz gagal
+    Dukungan dinamis via runtime_config (Dashboard), dengan fallback ke
+    SIMILARITY_ENGINE dari config / .env. Bila rapidfuzz gagal
     di-import, otomatis fallback ke difflib agar compare tidak pernah mati.
     """
     try:
-        from app.config import SIMILARITY_ENGINE as _eng
-        want_rf = (str(_eng or "rapidfuzz").strip().lower() != "difflib")
+        from app.runtime_config import runtime_config
+        rc = runtime_config.get_config()
+        want_rf = (rc.get("compare_engine") != "difflib")
     except Exception:
-        import os as _os
-        want_rf = (_os.getenv("SIMILARITY_ENGINE", "rapidfuzz").strip().lower() != "difflib")
+        try:
+            from app.config import SIMILARITY_ENGINE as _eng
+            want_rf = (str(_eng or "rapidfuzz").strip().lower() != "difflib")
+        except Exception:
+            import os as _os
+            want_rf = (_os.getenv("SIMILARITY_ENGINE", "rapidfuzz").strip().lower() != "difflib")
     return bool(want_rf and _RAPIDFUZZ_AVAILABLE)
 
 

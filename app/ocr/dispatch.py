@@ -18,27 +18,46 @@ from pathlib import Path
 from app.config import OCR_DET_THRESHOLD, OCR_ENGINE, OCR_REC_THRESHOLD
 
 
-def extract_label_text_from_bytes(image_bytes: bytes, original_filename: str = "") -> dict:
+def _resolve_profile(profile_override: str | None = None) -> tuple:
+    """Resolve (engine, rec_model, cascade_on, profile_name) dari runtime_config atau fallback."""
+    try:
+        from app.runtime_config import runtime_config, VALID_OCR_PROFILES
+
+        if profile_override and profile_override in VALID_OCR_PROFILES:
+            prof = VALID_OCR_PROFILES[profile_override]
+            return prof["engine"], prof["rec_model"], prof["cascade"], profile_override
+        rc = runtime_config.get_config()
+        return rc["ocr_engine"], rc["rapidocr_rec_model"], rc["ocr_cascade_enabled"], rc["ocr_profile"]
+    except Exception:
+        return (OCR_ENGINE or "paddle"), "small", False, "rapidocr_small"
+
+
+def extract_label_text_from_bytes(
+    image_bytes: bytes,
+    original_filename: str = "",
+    ocr_profile: str | None = None,
+) -> dict:
     """
     Ekstrak teks dari bytes (R3) — tanpa tempfile.
 
     Return standar sama seperti extract_label_text + tambahan aditif:
     image_scale, timings{decode_s,infer_s,det_s,cls_s,rec_s}.
     """
-    if OCR_ENGINE == "paddle":
-        from app.ocr.paddle_engine import extract_from_bytes
+    engine, rec_model, cascade_on, profile_name = _resolve_profile(ocr_profile)
+
+    if engine == "paddle":
+        from app.ocr.paddle_engine import active_model_label, extract_from_bytes
         from app.ocr.parser import build_paddle_result
 
-        raw = extract_from_bytes(image_bytes)
+        raw = extract_from_bytes(image_bytes, rec_model=rec_model, cascade=cascade_on)
         built = build_paddle_result(raw["lines_raw"], OCR_DET_THRESHOLD, OCR_REC_THRESHOLD)
         try:
-            from app.ocr.paddle_engine import active_model_label
-
-            lbl = active_model_label()
+            lbl = active_model_label(rec_model_override=rec_model)
         except Exception:
             lbl = {"det_model": None, "rec_model": None}
         return {
             "engine": "rapidocr",
+            "ocr_profile": profile_name,
             "raw_text": built["raw_text"],
             "cleaned_text": built["cleaned_text"],
             "lines": built["lines"],
@@ -53,7 +72,7 @@ def extract_label_text_from_bytes(image_bytes: bytes, original_filename: str = "
             "timings": raw.get("timings", {}),
         }
 
-    if OCR_ENGINE == "vitstr":
+    if engine == "vitstr":
         from app.ocr.vitstr_engine import extract_from_bytes as vitstr_extract
         from app.ocr.parser import clean_ocr_text
 
@@ -63,6 +82,7 @@ def extract_label_text_from_bytes(image_bytes: bytes, original_filename: str = "
         text_present = bool(text and text.strip())
         return {
             "engine": "vitstr",
+            "ocr_profile": profile_name,
             "raw_text": cleaned["raw_text"],
             "cleaned_text": cleaned["cleaned_text"] if text_present else "none",
             "lines": cleaned["lines"],
@@ -77,7 +97,7 @@ def extract_label_text_from_bytes(image_bytes: bytes, original_filename: str = "
             "timings": out.get("timings", {}),
         }
 
-    if OCR_ENGINE == "surya":
+    if engine == "surya":
         from app.ocr.surya_engine import extract_from_bytes as surya_extract
         from app.ocr.parser import clean_ocr_text
 
@@ -87,6 +107,7 @@ def extract_label_text_from_bytes(image_bytes: bytes, original_filename: str = "
         text_present = bool(cleaned["cleaned_text"] and cleaned["cleaned_text"].strip())
         return {
             "engine": "surya",
+            "ocr_profile": profile_name,
             "raw_text": cleaned["raw_text"],
             "cleaned_text": cleaned["cleaned_text"] if text_present else "none",
             "lines": cleaned["lines"],
@@ -108,7 +129,7 @@ def extract_label_text_from_bytes(image_bytes: bytes, original_filename: str = "
     try:
         _tmp.write(image_bytes)
         _tmp.close()
-        return extract_label_text(_tmp.name, original_filename)
+        return extract_label_text(_tmp.name, original_filename, ocr_profile=ocr_profile)
     finally:
         try:
             import os as _os
@@ -118,29 +139,37 @@ def extract_label_text_from_bytes(image_bytes: bytes, original_filename: str = "
             pass
 
 
-def extract_label_text(image_path: str | Path, original_filename: str = "") -> dict:
+def extract_label_text(
+    image_path: str | Path,
+    original_filename: str = "",
+    ocr_profile: str | None = None,
+) -> dict:
     """
     Ekstrak teks 1 gambar label via engine aktif.
 
     Args:
         image_path: Path ke file gambar.
         original_filename: Nama asli client (info saja, untuk log).
+        ocr_profile: Opsional nama profil untuk override runtime.
 
     Returns:
         dict standar (lihat modul docstring).
     """
-    if OCR_ENGINE == "paddle":
+    engine, rec_model, cascade_on, profile_name = _resolve_profile(ocr_profile)
+
+    if engine == "paddle":
         from app.ocr.paddle_engine import active_model_label, extract_text_paddle
         from app.ocr.parser import build_paddle_result
 
-        out = extract_text_paddle(image_path)
+        out = extract_text_paddle(image_path, rec_model=rec_model, cascade=cascade_on)
         built = build_paddle_result(out["lines_raw"], OCR_DET_THRESHOLD, OCR_REC_THRESHOLD)
         try:
-            lbl = active_model_label()
+            lbl = active_model_label(rec_model_override=rec_model)
         except Exception:
             lbl = {"det_model": None, "rec_model": None}
         return {
             "engine": "rapidocr",
+            "ocr_profile": profile_name,
             "raw_text": built["raw_text"],
             "cleaned_text": built["cleaned_text"],
             "lines": built["lines"],
@@ -155,7 +184,7 @@ def extract_label_text(image_path: str | Path, original_filename: str = "") -> d
             "timings": out.get("timings", {}),
         }
 
-    if OCR_ENGINE == "vitstr":
+    if engine == "vitstr":
         from app.ocr.vitstr_engine import extract_from_path as vitstr_extract_path
         from app.ocr.parser import clean_ocr_text
 
@@ -165,6 +194,7 @@ def extract_label_text(image_path: str | Path, original_filename: str = "") -> d
         text_present = bool(text and text.strip())
         return {
             "engine": "vitstr",
+            "ocr_profile": profile_name,
             "raw_text": cleaned["raw_text"],
             "cleaned_text": cleaned["cleaned_text"] if text_present else "none",
             "lines": cleaned["lines"],
@@ -179,7 +209,7 @@ def extract_label_text(image_path: str | Path, original_filename: str = "") -> d
             "timings": out.get("timings", {}),
         }
 
-    if OCR_ENGINE == "surya":
+    if engine == "surya":
         from app.ocr.surya_engine import extract_from_path as surya_extract_path
         from app.ocr.parser import clean_ocr_text
 
@@ -189,6 +219,7 @@ def extract_label_text(image_path: str | Path, original_filename: str = "") -> d
         text_present = bool(cleaned["cleaned_text"] and cleaned["cleaned_text"].strip())
         return {
             "engine": "surya",
+            "ocr_profile": profile_name,
             "raw_text": cleaned["raw_text"],
             "cleaned_text": cleaned["cleaned_text"] if text_present else "none",
             "lines": cleaned["lines"],
