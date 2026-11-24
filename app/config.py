@@ -68,7 +68,7 @@ RATE_LIMIT_SECONDS = 60
 # Sekarang: burst sliding-window, default 5 req / 60s (via env, BUTUH RESTART).
 # Alasan 5: preview front+back (2) + forward save front+back (2) + 1 retake cadangan.
 # Spam 6+/menit masih 429 + Retry-After (anti-abuse tetap jalan).
-POST_RATE_LIMIT_REQUESTS = int(os.getenv("POST_RATE_LIMIT_REQUESTS", "20"))
+POST_RATE_LIMIT_REQUESTS = int(os.getenv("POST_RATE_LIMIT_REQUESTS", "60"))
 POST_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("POST_RATE_LIMIT_WINDOW_SECONDS", "60"))
 
 # --- Rate limiting GET (polling) & DELETE (cleanup) — Ideal handling 429 (11. Penanganan 429) ---

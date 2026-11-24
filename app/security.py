@@ -158,7 +158,7 @@ def check_post_rate_limit() -> tuple[bool, float, int]:
     try:
         from app.config import POST_RATE_LIMIT_REQUESTS, POST_RATE_LIMIT_WINDOW_SECONDS
     except ImportError:
-        POST_RATE_LIMIT_REQUESTS, POST_RATE_LIMIT_WINDOW_SECONDS = 5, 60
+        POST_RATE_LIMIT_REQUESTS, POST_RATE_LIMIT_WINDOW_SECONDS = 60, 60
     return _check_sliding_window(_post_timestamps, _post_lock, POST_RATE_LIMIT_REQUESTS, POST_RATE_LIMIT_WINDOW_SECONDS)
 
 
