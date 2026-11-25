@@ -230,6 +230,9 @@ async def save_check_batch(
     images: Optional[List[UploadFile]] = File(None, description="4-5 files PNG/JPEG (images atau images[0..n])"),
     user_id: Optional[str] = Form(None, description="Opsional audit user_id dari Laravel"),
     timestamp: Optional[str] = Form(None, description="Opsional ISO8601 timestamp dari Laravel"),
+    set_code: Optional[str] = Form(None, description="Opsional set_code multi-lembar"),
+    sheet_no: Optional[int] = Form(1, description="Opsional nomor lembar (1..4)"),
+    sheet_count: Optional[int] = Form(1, description="Opsional total lembar template (1..4)"),
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     x_api_key_lower: Optional[str] = Header(None, alias="x-api-key"),
 ):
@@ -606,6 +609,9 @@ async def save_check_batch(
         content={
             "success": True,
             "batch_code": safe_batch,
+            "set_code": set_code,
+            "sheet_no": sheet_no,
+            "sheet_count": sheet_count,
             "reference_id": reference_id,
             "template_id": template_id,
             "saved_count": expected_count,
@@ -2016,6 +2022,9 @@ async def process_check_batch(
     reference_filename: Optional[str] = None
     # FIX_WRONG_REFERENCE (2026-10-07): map acuan per slot (dict/list/str-JSON).
     reference_texts = None
+    set_code: Optional[str] = None
+    sheet_no: Optional[int] = None
+    sheet_count: Optional[int] = None
     # 1. Try JSON body (for Laravel CheckOcrClient which sends JSON)
     try:
         ctype = request.headers.get("content-type", "") or ""
@@ -2023,6 +2032,9 @@ async def process_check_batch(
             body = await request.json()
             if isinstance(body, dict):
                 batch_code = body.get("batch_code") or body.get("batchCode")
+                set_code = body.get("set_code") or body.get("setCode")
+                sheet_no = body.get("sheet_no") or body.get("sheetNo")
+                sheet_count = body.get("sheet_count") or body.get("sheetCount")
                 # COMPARE_TEXT_SIMILARITY_PLAN (2026-09-12): reference teks (opsional).
                 reference_text = body.get("reference_text") or body.get("referenceText")
                 # REVIEW_FLOW_COMPARE_FRONT_BACK_PLAN (2026-10-05): reference per sisi.
@@ -2226,6 +2238,12 @@ async def process_check_batch(
                         cmp_req["reference_texts"] = json.loads(json.dumps(reference_texts))
                     except Exception:
                         cmp_req["reference_texts"] = str(reference_texts)[:20000]
+            if set_code:
+                cmp_req["set_code"] = str(set_code)[:64]
+            if sheet_no is not None:
+                cmp_req["sheet_no"] = int(sheet_no)
+            if sheet_count is not None:
+                cmp_req["sheet_count"] = int(sheet_count)
             cmp_req["created_at"] = datetime.now(JAKARTA_TZ).isoformat()
             tmp = bdir / "compare_request.json.tmp"
             with open(tmp, "w", encoding="utf-8") as f:

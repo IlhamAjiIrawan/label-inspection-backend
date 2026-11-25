@@ -108,6 +108,12 @@ def build_callback_payload(
                     payload["label_slot"] = int(str(_slot).strip()) if str(_slot).strip() != "" else ""
                 except (ValueError, TypeError):
                     payload["label_slot"] = _slot
+            if "sheet_no" in meta_entry and str(meta_entry.get("sheet_no", "")).strip() != "":
+                _sn = str(meta_entry.get("sheet_no", "")).strip()
+                try:
+                    payload["sheet_no"] = int(_sn)
+                except (ValueError, TypeError):
+                    pass
             if "reference_id" in meta_entry:
                 payload["reference_id"] = meta_entry.get("reference_id", "")
 

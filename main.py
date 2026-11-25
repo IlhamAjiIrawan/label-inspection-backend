@@ -627,6 +627,7 @@ async def post_status(
     # callback + polling bisa korelasikan Label 1 vs Label 2 (anti-tertukar/stale).
     check_session_id: Optional[str] = Form(None),
     label_slot: Optional[str] = Form(None),
+    sheet_no: Optional[str] = Form(None),
     reference_id: Optional[str] = Form(None),
 ):
     global latest_source, latest_timestamp, latest_template_id, latest_template_name
@@ -720,6 +721,15 @@ async def post_status(
         _reference_id_clean = (reference_id or "").strip()[:32]
     except Exception:
         _reference_id_clean = ""
+    _sheet_no_clean: object = ""
+    try:
+        _sn_raw = (sheet_no or "").strip()[:8]
+        if _sn_raw:
+            _sn_val = int(float(_sn_raw))
+            if 1 <= _sn_val <= 4:
+                _sheet_no_clean = _sn_val
+    except Exception:
+        _sheet_no_clean = ""
 
     # --- Update metadata.json (Tahap 2) ---
     try:
@@ -741,6 +751,7 @@ async def post_status(
             # Kosong (""/"") bila alur lama tanpa field ini — callback/polling tetap jalan.
             "check_session_id": _check_session_clean,
             "label_slot": _label_slot_clean,
+            "sheet_no": _sheet_no_clean,
             "reference_id": _reference_id_clean,
             # [OCR-REENABLE 2026-09-11 / PLAN_REVERT_TO_OCR] — kembali ke OCR awal.
             #     Marker lama [OCR-DISABLED 2026-09-10] dibiarkan sebagai jejak di bawah.
@@ -836,6 +847,7 @@ async def post_status(
             # Checking Label 2-capture echo (aditif; "" bila alur lama tanpa field ini)
             "check_session_id": _check_session_clean,
             "label_slot": _label_slot_clean,
+            "sheet_no": _sheet_no_clean,
             "reference_id": _reference_id_clean,
             "poll_url": f"/api/test/ocr/{saved_filename}",
             "image_url": f"/api/test/image/{saved_filename}",
