@@ -32,6 +32,28 @@ def _resolve_profile(profile_override: str | None = None) -> tuple:
         return (OCR_ENGINE or "paddle"), "small", False, "rapidocr_small"
 
 
+def _blank_ocr_result(engine_name: str, profile_name: str, blank_info: dict) -> dict:
+    """Bangun result OCR standar 'none' saat crop terdeteksi sebagai label kosong."""
+    return {
+        "engine": engine_name,
+        "ocr_profile": profile_name,
+        "raw_text": "",
+        "cleaned_text": "none",
+        "lines": [],
+        "text_present": False,
+        "is_empty": False,
+        "is_blank": True,
+        "empty_reason": "blank_label",
+        "blank_metrics": blank_info,
+        "det_threshold": OCR_DET_THRESHOLD if engine_name == "rapidocr" else None,
+        "rec_threshold": OCR_REC_THRESHOLD if engine_name == "rapidocr" else None,
+        "det_model": None,
+        "rec_model": None,
+        "image_scale": 1.0,
+        "timings": {"blank_skip": True},
+    }
+
+
 def extract_label_text_from_bytes(
     image_bytes: bytes,
     original_filename: str = "",
@@ -44,6 +66,16 @@ def extract_label_text_from_bytes(
     image_scale, timings{decode_s,infer_s,det_s,cls_s,rec_s}.
     """
     engine, rec_model, cascade_on, profile_name = _resolve_profile(ocr_profile)
+    engine_label = "rapidocr" if engine == "paddle" else engine
+
+    try:
+        from app.vision.blank_detector import detect_blank_label_bytes
+
+        blank_info = detect_blank_label_bytes(image_bytes)
+        if blank_info.get("is_blank"):
+            return _blank_ocr_result(engine_label, profile_name, blank_info)
+    except Exception:
+        pass
 
     if engine == "paddle":
         from app.ocr.paddle_engine import active_model_label, extract_from_bytes
@@ -156,6 +188,16 @@ def extract_label_text(
         dict standar (lihat modul docstring).
     """
     engine, rec_model, cascade_on, profile_name = _resolve_profile(ocr_profile)
+    engine_label = "rapidocr" if engine == "paddle" else engine
+
+    try:
+        from app.vision.blank_detector import detect_blank_label_path
+
+        blank_info = detect_blank_label_path(image_path)
+        if blank_info.get("is_blank"):
+            return _blank_ocr_result(engine_label, profile_name, blank_info)
+    except Exception:
+        pass
 
     if engine == "paddle":
         from app.ocr.paddle_engine import active_model_label, extract_text_paddle

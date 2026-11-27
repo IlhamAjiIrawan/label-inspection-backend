@@ -435,3 +435,12 @@ REF_MAX_BYTES_MB = float(os.getenv("REF_MAX_BYTES_MB", "2048"))  # soft quota
 # Default 60 req / 60s agar simpan multi-lembar (mis. 4 lembar × 4 label = 16 push/set) tidak kena 429.
 REF_RATE_LIMIT_REQUESTS = int(os.getenv("REF_RATE_LIMIT_REQUESTS", "60"))
 REF_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("REF_RATE_LIMIT_WINDOW_SECONDS", "60"))
+
+# ---------------------------------------------------------------------------
+# Deteksi Label Kosong (Blank Label + Anti Bleed-Through)
+# ---------------------------------------------------------------------------
+BLANK_LABEL_DETECT_ENABLED = os.getenv("BLANK_LABEL_DETECT_ENABLED", "true").lower() == "true"
+BLANK_INK_DELTA = float(os.getenv("BLANK_INK_DELTA", "48"))
+BLANK_MIN_INK_RATIO = float(os.getenv("BLANK_MIN_INK_RATIO", "0.0012"))
+BLANK_SOBEL_MIN = float(os.getenv("BLANK_SOBEL_MIN", "45"))
+BLANK_BORDER_TRIM_RATIO = float(os.getenv("BLANK_BORDER_TRIM_RATIO", "0.06"))

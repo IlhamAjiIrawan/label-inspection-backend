@@ -118,7 +118,8 @@ def refine_tight_bounds(
     is_vertical: bool,
     margin_ratio_long: float = 0.02,
     margin_ratio_short: float = 0.08,
-    keep_full_short_axis: bool = True
+    keep_full_short_axis: bool = True,
+    preserve_blank_halves: bool = True,
 ) -> Tuple[int, int, int, int, int]:
     """
     Menemukan batas pita label yang presisi dan menghitung titik tengah (midpoint)
@@ -127,6 +128,10 @@ def refine_tight_bounds(
     Pada sumbu pendek (lebar pita jika vertikal), secara default mempertahankan
     seluruh lebar hasil ekspansi (keep_full_short_axis=True) agar teks memiliki
     margin kiri & kanan yang lega dan simetris, tidak terpotong.
+
+    preserve_blank_halves=True (default): mencegah pemangkasan sumbu panjang
+    jika salah satu ujung pita polos/kosong (mis. hanya berisi bleed-through),
+    sehingga belahan label kosong tetap utuh dan midpoint berada tepat di lipatan tengah.
 
     Returns:
         (x_min, x_max, y_min, y_max, midpoint)
@@ -175,6 +180,12 @@ def refine_tight_bounds(
         else:
             y_min, y_max = 0, h
 
+        # Jika salah satu ujung terpotong > 12%, kemungkinan besar separuh pita
+        # adalah belahan label kosong (blank side) -> pertahankan batas penuh kontur
+        # agar label kosong tidak ikut terbuang sebelum pembelahan midpoint.
+        if preserve_blank_halves and (y_min > int(h * 0.12) or (h - y_max) > int(h * 0.12)):
+            y_min, y_max = 0, h
+
         # Midpoint tepat di tengah rentang Y pita yang sebenarnya
         y_mid = (y_min + y_max) // 2
         return x_min, x_max, y_min, y_max, y_mid
@@ -210,6 +221,9 @@ def refine_tight_bounds(
             x_min = max(0, act_x[0] - pad_x)
             x_max = min(w, act_x[-1] + pad_x)
         else:
+            x_min, x_max = 0, w
+
+        if preserve_blank_halves and (x_min > int(w * 0.12) or (w - x_max) > int(w * 0.12)):
             x_min, x_max = 0, w
 
         x_mid = (x_min + x_max) // 2

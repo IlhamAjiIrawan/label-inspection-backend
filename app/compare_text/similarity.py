@@ -585,6 +585,10 @@ def _is_no_text(cleaned: str) -> bool:
     return t in ("", "none")
 
 
+def _is_explicit_blank(cleaned: str) -> bool:
+    return (cleaned or "").strip().lower() == "none"
+
+
 def compare_slot(
     ref_text: str,
     slot_cleaned: str,
@@ -619,11 +623,34 @@ def compare_slot(
             "matched_lines": 0,
             "compare_engine": _engine_name,
         }
-        # Reference kosong / 'none' → SKIP semua slot.
-        if _is_no_text(ref_text or ""):
+        # Tidak ada reference (kosong / null) → SKIP.
+        if not (ref_text or "").strip():
             return {**base, "verdict": "SKIP", "score": None, "reason": "no_reference_text",
                     "diff_details": [], "punct_ignored_count": 0, "numeric_diff": False,
                     "unexplained_orphans": 0}
+
+        # Reference memang label kosong ('none') → Check wajib ikut kosong (PASS),
+        # bila Check justru berisi teks cetak → FAIL (salah cetak / label terbalik).
+        if _is_explicit_blank(ref_text or ""):
+            if _is_no_text(slot_cleaned or "") and not lines:
+                return {**base, "ref_lines": 0, "verdict": "PASS", "score": 1.0,
+                        "reason": "blank_match", "diff_details": [],
+                        "punct_ignored_count": 0, "numeric_diff": False,
+                        "unexplained_orphans": 0}
+            unexpected_lines = lines if lines else [
+                ln.strip() for ln in (slot_cleaned or "").splitlines() if ln.strip()
+            ]
+            return {**base, "ref_lines": 0, "verdict": "FAIL", "score": 0.0,
+                    "reason": "unexpected_text_on_blank",
+                    "diff_details": [{
+                        "type": "added",
+                        "ref_line_num": None,
+                        "check_line_num": i + 1,
+                        "ref_text": None,
+                        "check_text": ln,
+                    } for i, ln in enumerate(unexpected_lines[:20])],
+                    "punct_ignored_count": 0, "numeric_diff": False,
+                    "unexplained_orphans": len(unexpected_lines)}
 
         # Slot kosong / gagal / 'none' → FAIL (reference jelas ada teks).
         if _is_no_text(slot_cleaned or "") and not lines:
