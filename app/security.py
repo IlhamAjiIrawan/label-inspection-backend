@@ -282,11 +282,10 @@ def reset_process_rate_limit_for_testing() -> None:
         _process_timestamps.clear()
 
 
-# --- Reference library rate limit (PLAN_REFERENCE_LIBRARY_FASTAPI, fix 2026-09-15) ---
-# POST /api/references & POST /from-capture punya limiter SENDIRI (10 req/menit),
-# terpisah dari limiter global capture 1/menit. Alasan: push library dari Laravel
-# selalu datang <1 detik setelah forward POST /api/test/status — kalau berbagi
-# slot global, push SELALU kena 429 dan library tidak pernah terisi (Jalur A gagal).
+# --- Reference library rate limit (PLAN_REFERENCE_LIBRARY_FASTAPI) ---
+# POST /api/references & POST /from-capture punya limiter SENDIRI (default 60 req/menit,
+# env REF_RATE_LIMIT_*), terpisah dari limiter capture agar multi-lembar
+# (mis. 4 lembar × 4 label = 16 push beruntun dalam beberapa detik) tidak kena 429.
 _reference_timestamps: deque = deque()
 _reference_lock = threading.Lock()
 
@@ -294,10 +293,14 @@ _reference_lock = threading.Lock()
 def check_reference_rate_limit() -> tuple[bool, float, int]:
     """
     Rate limit khusus create reference library.
-    Default: 10 req / 60s (longgar untuk push best-effort, tetap anti-spam).
+    Default: 60 req / 60s (config REF_RATE_LIMIT_REQUESTS/WINDOW).
     Returns (allowed, wait_seconds, remaining).
     """
-    return _check_sliding_window(_reference_timestamps, _reference_lock, 10, 60)
+    try:
+        from app.config import REF_RATE_LIMIT_REQUESTS, REF_RATE_LIMIT_WINDOW_SECONDS
+    except ImportError:
+        REF_RATE_LIMIT_REQUESTS, REF_RATE_LIMIT_WINDOW_SECONDS = 60, 60
+    return _check_sliding_window(_reference_timestamps, _reference_lock, REF_RATE_LIMIT_REQUESTS, REF_RATE_LIMIT_WINDOW_SECONDS)
 
 
 def get_rate_limit_headers(limit: int, remaining: int, reset_seconds: float) -> dict:

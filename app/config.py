@@ -431,3 +431,7 @@ REF_JPG_QUALITY = int(os.getenv("REF_JPG_QUALITY", "82"))
 REF_THUMB_QUALITY = int(os.getenv("REF_THUMB_QUALITY", "70"))
 REF_MAX_COUNT = int(os.getenv("REF_MAX_COUNT", "2000"))
 REF_MAX_BYTES_MB = float(os.getenv("REF_MAX_BYTES_MB", "2048"))  # soft quota
+# Rate limit push Reference Library (POST /api/references & /from-capture).
+# Default 60 req / 60s agar simpan multi-lembar (mis. 4 lembar × 4 label = 16 push/set) tidak kena 429.
+REF_RATE_LIMIT_REQUESTS = int(os.getenv("REF_RATE_LIMIT_REQUESTS", "60"))
+REF_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("REF_RATE_LIMIT_WINDOW_SECONDS", "60"))

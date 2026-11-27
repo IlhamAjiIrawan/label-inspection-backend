@@ -219,13 +219,17 @@ def _extract_api_key(request: Request, header_key: Optional[str] = None) -> Opti
 
 
 def _429_post(wait: float) -> JSONResponse:
-    # Limiter khusus library: 10 req/menit (bukan 1/menit seperti capture).
+    # Limiter khusus library (default 60 req/menit via REF_RATE_LIMIT_REQUESTS).
+    try:
+        from app.config import REF_RATE_LIMIT_REQUESTS
+    except ImportError:
+        REF_RATE_LIMIT_REQUESTS = 60
     wait_int = int(wait) + 1
     return JSONResponse(
         status_code=429,
         content={
             "success": False,
-            "message": f"Rate limit exceeded. Maximum 10 references per minute. Please wait {wait_int} seconds.",
+            "message": f"Rate limit exceeded. Maximum {REF_RATE_LIMIT_REQUESTS} references per minute. Please wait {wait_int} seconds.",
             "error": "too_many_requests",
             "retry_after_seconds": wait_int,
         },
@@ -438,8 +442,8 @@ async def create_reference(
     if not _validate_api_key(effective_key):
         return JSONResponse(status_code=401, content={"success": False, "message": "Invalid API key", "error": "unauthorized"})
 
-    # Limiter khusus library (10/menit) — JANGAN pakai check_rate_limit global
-    # 1/menit milik capture, agar push setelah forward tidak 429.
+    # Limiter khusus library (default 60/menit via REF_RATE_LIMIT_REQUESTS) —
+    # JANGAN pakai check_rate_limit capture, agar push multi-lembar tidak 429.
     allowed, wait, _remaining = check_reference_rate_limit()
     if not allowed:
         return _429_post(wait)
@@ -778,7 +782,7 @@ async def create_from_capture(
     if not _validate_api_key(effective_key):
         return JSONResponse(status_code=401, content={"success": False, "message": "Invalid API key", "error": "unauthorized"})
 
-    # Limiter khusus library (10/menit) — sama seperti POST / (lihat komentar di atas).
+    # Limiter khusus library (default 60/menit via REF_RATE_LIMIT_REQUESTS) — sama seperti POST / (lihat komentar di atas).
     allowed, wait, _remaining = check_reference_rate_limit()
     if not allowed:
         return _429_post(wait)
